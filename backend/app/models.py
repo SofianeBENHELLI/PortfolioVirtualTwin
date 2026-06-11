@@ -70,6 +70,16 @@ class MarketDataSnapshot(Base):
     as_of: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class WatchedStock(Base):
+    """A stock the user tracks (independent of holding a position in it)."""
+    __tablename__ = "watched_stocks"
+    __table_args__ = (UniqueConstraint("user_id", "symbol", name="uq_user_watched_symbol"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    symbol: Mapped[str] = mapped_column(String(20), index=True)
+    added_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
 class ResearchDocument(Base):
     __tablename__ = "research_documents"
     id: Mapped[int] = mapped_column(primary_key=True)

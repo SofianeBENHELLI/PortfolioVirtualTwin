@@ -1,0 +1,153 @@
+"""Tracked stocks: open-source data snapshots (refreshed on demand) + latest
+Bull/Bear agent signals per symbol."""
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from app.agents.graphs import gather_symbol_data, run_bull_bear
+from app.agents.llm import require_llm
+from app.audit.service import audit
+from app.core.db import get_db
+from app.core.security import get_current_user
+from app.models import MarketDataSnapshot, Recommendation, User, WatchedStock
+from app.strategy import service as strategy_service
+
+router = APIRouter(prefix="/api/watchlist", tags=["watchlist"])
+
+
+class AddSymbol(BaseModel):
+    symbol: str
+
+
+class BullBearRequest(BaseModel):
+    strategy_id: int
+    symbols: list[str] = []  # default: whole watchlist
+
+
+def _latest_signals(db: Session, user_id: int, symbols: list[str]) -> dict[str, dict]:
+    """Newest bull and bear recommendation per symbol."""
+    if not symbols:
+        return {}
+    rows = db.scalars(
+        select(Recommendation)
+        .where(Recommendation.user_id == user_id, Recommendation.symbol.in_(symbols))
+        .order_by(Recommendation.created_at.desc()).limit(400)
+    ).all()
+    out: dict[str, dict] = {s: {} for s in symbols}
+    for r in rows:
+        perspective = (r.data_used or {}).get("perspective")
+        if perspective not in ("bull", "bear") or perspective in out[r.symbol]:
+            continue
+        out[r.symbol][perspective] = {
+            "signal_strength": (r.data_used or {}).get("signal_strength", r.confidence * 100),
+            "thesis": r.thesis,
+            "key_points": (r.data_used or {}).get("key_points", []),
+            "invalidation": r.invalidation,
+            "created_at": r.created_at.isoformat(),
+        }
+    return out
+
+
+def _payload(db: Session, user_id: int, watched: list[WatchedStock]) -> list[dict]:
+    symbols = [w.symbol for w in watched]
+    snaps = {
+        s.symbol: s for s in
+        db.scalars(select(MarketDataSnapshot).where(MarketDataSnapshot.symbol.in_(symbols))).all()
+    } if symbols else {}
+    signals = _latest_signals(db, user_id, symbols)
+    out = []
+    for w in watched:
+        snap = snaps.get(w.symbol)
+        ind = dict(snap.indicators) if snap and snap.indicators else {}
+        fundamentals = ind.pop("fundamentals", {})
+        out.append({
+            "symbol": w.symbol,
+            "added_at": w.added_at.isoformat(),
+            "price": snap.price if snap else None,
+            "data_as_of": snap.as_of.isoformat() if snap else None,
+            "indicators": ind,
+            "fundamentals": fundamentals,
+            "bull": signals.get(w.symbol, {}).get("bull"),
+            "bear": signals.get(w.symbol, {}).get("bear"),
+        })
+    return out
+
+
+@router.get("")
+def list_watchlist(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    watched = db.scalars(select(WatchedStock).where(WatchedStock.user_id == user.id)
+                         .order_by(WatchedStock.added_at)).all()
+    return _payload(db, user.id, watched)
+
+
+@router.post("")
+def add_symbol(payload: AddSymbol, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    symbol = payload.symbol.strip().upper()
+    if not symbol or len(symbol) > 10 or not symbol.replace(".", "").replace("-", "").isalnum():
+        raise HTTPException(422, "Invalid symbol")
+    exists = db.scalar(select(WatchedStock).where(WatchedStock.user_id == user.id,
+                                                  WatchedStock.symbol == symbol))
+    if exists:
+        raise HTTPException(409, f"{symbol} is already tracked")
+    db.add(WatchedStock(user_id=user.id, symbol=symbol))
+    audit(db, "watchlist.added", user_id=user.id, entity="watched_stock", entity_id=symbol)
+    db.commit()
+    return {"ok": True, "symbol": symbol}
+
+
+@router.delete("/{symbol}")
+def remove_symbol(symbol: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    row = db.scalar(select(WatchedStock).where(WatchedStock.user_id == user.id,
+                                               WatchedStock.symbol == symbol.upper()))
+    if row is None:
+        raise HTTPException(404, "Not tracked")
+    db.delete(row)
+    audit(db, "watchlist.removed", user_id=user.id, entity="watched_stock", entity_id=symbol.upper())
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/refresh")
+def refresh_data(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Re-fetch open-source data (prices, technicals, fundamentals) for every tracked stock."""
+    watched = db.scalars(select(WatchedStock).where(WatchedStock.user_id == user.id)).all()
+    if not watched:
+        raise HTTPException(409, "Watchlist is empty — add symbols first")
+    symbols = [w.symbol for w in watched]
+    data = gather_symbol_data(symbols, "SPY")
+    now = datetime.now(timezone.utc)
+    for sym, entry in data.items():
+        snap = db.scalar(select(MarketDataSnapshot).where(MarketDataSnapshot.symbol == sym))
+        indicators = {**entry["indicators"], "fundamentals": entry["fundamentals"]}
+        if snap is None:
+            db.add(MarketDataSnapshot(symbol=sym, price=entry["price"], indicators=indicators, as_of=now))
+        else:
+            snap.price = entry["price"]
+            snap.indicators = indicators
+            snap.as_of = now
+    audit(db, "watchlist.data_refreshed", user_id=user.id,
+          payload={"symbols": symbols, "fetched": list(data.keys())})
+    db.commit()
+    missing = [s for s in symbols if s not in data]
+    return {"refreshed": list(data.keys()), "no_data": missing}
+
+
+@router.post("/bullbear")
+def bull_bear(payload: BullBearRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Run the Bull and Bear agents on tracked stocks (or an explicit subset)."""
+    require_llm()
+    version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
+    symbols = [s.upper() for s in payload.symbols]
+    if not symbols:
+        symbols = [w.symbol for w in db.scalars(
+            select(WatchedStock).where(WatchedStock.user_id == user.id)).all()]
+    if not symbols:
+        raise HTTPException(409, "Watchlist is empty — add symbols first")
+    run = run_bull_bear(db, user.id, twin, version.id, symbols)
+    if run.status == "failed":
+        raise HTTPException(502, f"Bull/Bear run failed: {run.error}")
+    return {"agent_run_id": run.id, "summary": run.summary,
+            "tokens": run.prompt_tokens + run.completion_tokens}

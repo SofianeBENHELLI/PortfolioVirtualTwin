@@ -6,14 +6,30 @@ import { useCallback, useEffect, useState } from "react";
 import { api, fmtMoney, fmtPct, getToken, pnlColor, setToken } from "@/lib/api";
 import { Badge } from "@/components/ui/badge";
 
-const NAV = [
-  { href: "/", label: "Portfolio" },
-  { href: "/trading", label: "Trading Console" },
-  { href: "/research", label: "Research Desk" },
-  { href: "/backtests", label: "Backtest Lab" },
-  { href: "/strategies", label: "Strategies" },
-  { href: "/risk", label: "Risk Cockpit" },
-  { href: "/audit", label: "Audit Log" },
+const NAV: { section: string; items: { href: string; label: string }[] }[] = [
+  {
+    section: "My desk",
+    items: [
+      { href: "/", label: "Portfolio" },
+      { href: "/stocks", label: "My Stocks" },
+      { href: "/risk", label: "Risks" },
+    ],
+  },
+  {
+    section: "Decide",
+    items: [
+      { href: "/trading", label: "Trading Console" },
+      { href: "/research", label: "Research Desk" },
+      { href: "/backtests", label: "Backtest Lab" },
+    ],
+  },
+  {
+    section: "Setup",
+    items: [
+      { href: "/strategies", label: "My Strategy" },
+      { href: "/audit", label: "Audit Log" },
+    ],
+  },
 ];
 
 type Summary = {
@@ -62,15 +78,22 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           <div className="text-xs text-zinc-400">Strategy Twin · Investment OS</div>
         </div>
         <nav className="flex-1 py-3">
-          {NAV.map((item) => (
-            <Link key={item.href} href={item.href}
-              className={`block px-4 py-2 text-sm hover:bg-zinc-800 ${
-                pathname === item.href ? "bg-zinc-800 font-medium" : "text-zinc-300"}`}>
-              {item.label}
-              {item.href === "/risk" && alertCount > 0 && (
-                <span className="ml-2 rounded-full bg-red-600 px-1.5 text-xs">{alertCount}</span>
-              )}
-            </Link>
+          {NAV.map((group) => (
+            <div key={group.section} className="mb-3">
+              <div className="px-4 pb-1 text-[10px] font-semibold uppercase tracking-widest text-zinc-500">
+                {group.section}
+              </div>
+              {group.items.map((item) => (
+                <Link key={item.href} href={item.href}
+                  className={`block px-4 py-2 text-sm hover:bg-zinc-800 ${
+                    pathname === item.href ? "bg-zinc-800 font-medium border-l-2 border-amber-400" : "text-zinc-300"}`}>
+                  {item.label}
+                  {item.href === "/risk" && alertCount > 0 && (
+                    <span className="ml-2 rounded-full bg-red-600 px-1.5 text-xs">{alertCount}</span>
+                  )}
+                </Link>
+              ))}
+            </div>
           ))}
         </nav>
         <button onClick={() => { setToken(null); router.push("/login"); }}

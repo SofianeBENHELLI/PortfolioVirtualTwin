@@ -13,14 +13,19 @@ deterministic rules validate, **you approve**.
 
 1. **Capture your strategy** — describe it in plain language (AI builder) or write the YAML
    directly. Every save is an immutable version.
-2. **Research** — a LangGraph agent gathers price indicators + fundamentals per ticker and
+2. **Track stocks** — a *My Stocks* watchlist with on-demand refresh of open-source data
+   (price, technical indicators, ~19 yfinance fundamentals) per tracked symbol.
+3. **Bull & Bear agents** — two adversarial agents argue each tracked stock: the Bull builds
+   the strongest data-grounded buy case (0–100 signal), the Bear the strongest sell case.
+   Both cite the fetched numbers and state what would invalidate them.
+4. **Research** — a LangGraph agent gathers price indicators + fundamentals per ticker and
    produces recommendations with confidence, thesis, and *what would invalidate it*.
-3. **Backtest** — rule AST → vectorbt signal matrices, equity vs benchmark, QuantStats
+5. **Backtest** — rule AST → vectorbt signal matrices, equity vs benchmark, QuantStats
    tearsheet. Rules that can't be tested from price history are listed, not silently dropped.
-4. **Paper trade** — internal fill simulator (zero setup) or Alpaca paper API, behind one
+6. **Paper trade** — internal fill simulator (zero setup) or Alpaca paper API, behind one
    broker interface. Every order passes ~11 deterministic risk gates first, then waits for
    your explicit approval.
-5. **Monitor** — portfolio dashboard (P&L, drawdown, exposure), risk cockpit (limits,
+7. **Monitor** — portfolio dashboard (P&L, drawdown, exposure), risk cockpit (limits,
    concentration, exit-rule alerts), AI daily briefing ("the portfolio gained because…"),
    and an append-only audit log of every state change.
 

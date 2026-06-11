@@ -100,14 +100,24 @@ class ResearchState(TypedDict):
     ct: int
 
 
-def _gather_node(state: ResearchState) -> dict:
+FUNDAMENTAL_KEYS = (
+    "sector", "industry", "longName", "trailingPE", "forwardPE", "priceToBook",
+    "revenueGrowth", "earningsGrowth", "profitMargins", "grossMargins", "debtToEquity",
+    "freeCashflow", "marketCap", "dividendYield", "beta", "fiftyTwoWeekHigh",
+    "fiftyTwoWeekLow", "targetMeanPrice", "recommendationKey",
+)
+
+
+def gather_symbol_data(symbols: list[str], benchmark: str) -> dict[str, dict]:
+    """Open-source data bundle per symbol: latest price, technical indicators (computed
+    from OHLCV history), and yfinance fundamentals. Shared by research, bull/bear, and
+    the watchlist refresh."""
     end = datetime.now(timezone.utc)
     start = end - timedelta(days=400)
-    twin = StrategyTwin.model_validate(state["twin"])
-    history = cached_history(state["symbols"] + [twin.benchmark], start, end)
-    bench_df = history.get(twin.benchmark)
-    data: dict = {}
-    for sym in state["symbols"]:
+    history = cached_history(symbols + [benchmark], start, end)
+    bench_df = history.get(benchmark)
+    data: dict[str, dict] = {}
+    for sym in symbols:
         df = history.get(sym)
         if df is None or df.empty:
             continue
@@ -115,15 +125,16 @@ def _gather_node(state: ResearchState) -> dict:
         try:
             import yfinance as yf
             info = yf.Ticker(sym).info or {}
-            entry["fundamentals"] = {
-                k: info.get(k) for k in ("sector", "trailingPE", "forwardPE", "revenueGrowth",
-                                         "profitMargins", "debtToEquity", "marketCap")
-                if info.get(k) is not None
-            }
+            entry["fundamentals"] = {k: info.get(k) for k in FUNDAMENTAL_KEYS if info.get(k) is not None}
         except Exception:
             entry["fundamentals"] = {}
         data[sym] = entry
-    return {"data": data}
+    return data
+
+
+def _gather_node(state: ResearchState) -> dict:
+    twin = StrategyTwin.model_validate(state["twin"])
+    return {"data": gather_symbol_data(state["symbols"], twin.benchmark)}
 
 
 def _analyze_node(state: ResearchState) -> dict:
@@ -190,6 +201,80 @@ def run_research(db: Session, user_id: int, twin: StrategyTwin, version_id: int 
                     out["pt"], out["ct"])
         audit(db, "agent.research_done", user_id=user_id, actor="agent", entity="agent_run",
               entity_id=run.id, payload={"recommendations": n})
+        db.commit()
+    except Exception as exc:
+        _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
+    return run
+
+
+# ---------------------------------------------------------------- Bull/Bear duo
+# Two adversarial agents per stock: the Bull builds the strongest data-grounded BUY
+# case, the Bear the strongest SELL/avoid case. Both are stored as Recommendations
+# (perspective in data_used) — like everything agents produce, they are signals for
+# the human, never orders.
+
+class AdversarialCase(BaseModel):
+    signal_strength: float = Field(ge=0, le=100, description="0 = no case at all, 100 = extremely strong case")
+    thesis: str = Field(description="2-3 sentences, grounded in the provided data with cited numbers")
+    key_points: list[str] = Field(description="3-5 bullet points, each citing a number from the data")
+    invalidation: str = Field(description="what observable change would kill this case")
+
+
+BULL_PROMPT = """You are the BULL agent — a disciplined long-side analyst. Build the STRONGEST
+honest case to BUY {sym} right now, using ONLY the data below. Cite exact numbers. If the data
+is genuinely weak, say so with a low signal_strength — never invent strength.
+Strategy context: style={style}, horizon={horizon}.
+Data: {data}"""
+
+BEAR_PROMPT = """You are the BEAR agent — a skeptical short-side analyst. Build the STRONGEST
+honest case to SELL / avoid {sym} right now, using ONLY the data below. Cite exact numbers.
+Hunt for stretched valuation, deteriorating fundamentals, broken momentum, crowding. If the
+data is genuinely solid, admit it with a low signal_strength — never invent weakness.
+Strategy context: style={style}, horizon={horizon}.
+Data: {data}"""
+
+
+def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int | None,
+                  symbols: list[str]) -> AgentRun:
+    symbols = [s.upper() for s in symbols][:8]  # 2 LLM calls per symbol — keep runs cheap
+    run = AgentRun(user_id=user_id, graph="bullbear", strategy_version_id=version_id,
+                   inputs={"symbols": symbols})
+    db.add(run)
+    db.commit()
+    try:
+        data = gather_symbol_data(symbols, twin.benchmark)
+        model = get_chat_model(temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
+        pt = ct = n = 0
+        for sym, payload in data.items():
+            for perspective, prompt_tpl, action in (("bull", BULL_PROMPT, "buy"), ("bear", BEAR_PROMPT, "sell")):
+                try:
+                    result = model.invoke(prompt_tpl.format(
+                        sym=sym, data=payload,
+                        style=twin.investment_thesis.style, horizon=twin.investment_thesis.horizon))
+                    raw = result.get("raw")
+                    if raw is not None:
+                        p, c = usage_from(raw)
+                        pt, ct = pt + p, ct + c
+                    case = result["parsed"]
+                    if case is None:
+                        continue
+                    db.add(Recommendation(
+                        agent_run_id=run.id, user_id=user_id, symbol=sym, action=action,
+                        confidence=case.signal_strength / 100.0, thesis=case.thesis,
+                        invalidation=case.invalidation,
+                        data_used={"perspective": perspective, "key_points": case.key_points,
+                                   "signal_strength": case.signal_strength},
+                    ))
+                    n += 1
+                except Exception:
+                    continue  # one bad symbol/perspective shouldn't kill the run
+        missing = [s for s in symbols if s not in data]
+        summary = f"Bull & Bear debated {len(data)} stocks → {n} signals"
+        if missing:
+            summary += f" (no market data for {', '.join(missing)})"
+        _finish_run(db, run, summary, pt, ct)
+        audit(db, "agent.bullbear_done", user_id=user_id, actor="agent", entity="agent_run",
+              entity_id=run.id, payload={"signals": n, "symbols": symbols})
         db.commit()
     except Exception as exc:
         _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
