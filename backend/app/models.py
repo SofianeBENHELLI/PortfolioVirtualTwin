@@ -143,7 +143,11 @@ class Portfolio(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     name: Mapped[str] = mapped_column(String(255), default="Paper Portfolio")
-    broker: Mapped[str] = mapped_column(String(20), default="sim")  # sim | alpaca_paper
+    # paper: simulated, tradeable through the approval pipeline.
+    # real_tracked: mirror of an actual brokerage account — holdings entered manually,
+    # valued live, NEVER tradeable from this app.
+    kind: Mapped[str] = mapped_column(String(12), default="paper")  # paper | real_tracked
+    broker: Mapped[str] = mapped_column(String(20), default="sim")  # sim | alpaca_paper | none
     mode: Mapped[str] = mapped_column(String(10), default="paper")  # paper only in MVP 1
     initial_cash: Mapped[float] = mapped_column(Float, default=100_000.0)
     cash: Mapped[float] = mapped_column(Float, default=100_000.0)

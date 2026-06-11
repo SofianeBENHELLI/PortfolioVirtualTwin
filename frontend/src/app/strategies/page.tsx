@@ -80,7 +80,12 @@ export default function StrategiesPage() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Strategies</h1>
+      <div className="flex items-center justify-between">
+        <h1 className="text-2xl font-bold">My Strategy</h1>
+        <Link href="/strategies/new">
+          <Button className="bg-emerald-700 hover:bg-emerald-800">+ Guided Strategy Builder</Button>
+        </Link>
+      </div>
 
       <div className="grid md:grid-cols-2 gap-4">
         {strategies.map((s) => (

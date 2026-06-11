@@ -18,10 +18,17 @@ router = APIRouter(prefix="/api/portfolios", tags=["portfolios"])
 
 
 class PortfolioCreate(BaseModel):
-    name: str = "Paper Portfolio"
-    broker: str = "sim"  # sim | alpaca_paper
+    name: str = ""  # defaults per kind below
+    kind: str = "paper"  # paper | real_tracked
+    broker: str = "sim"  # sim | alpaca_paper (paper kind only)
     initial_cash: float = 100_000.0
     strategy_id: int | None = None
+
+
+class HoldingUpsert(BaseModel):
+    symbol: str
+    qty: float
+    avg_entry_price: float
 
 
 class ProposalCreate(BaseModel):
@@ -38,31 +45,88 @@ class Decision(BaseModel):
     note: str = ""
 
 
+def _portfolio_out(p: Portfolio) -> dict:
+    return {"id": p.id, "name": p.name, "kind": p.kind, "broker": p.broker, "mode": p.mode,
+            "cash": p.cash, "initial_cash": p.initial_cash, "strategy_id": p.strategy_id}
+
+
 @router.get("")
 def list_portfolios(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     rows = db.scalars(select(Portfolio).where(Portfolio.user_id == user.id)).all()
-    return [{"id": p.id, "name": p.name, "broker": p.broker, "mode": p.mode,
-             "cash": p.cash, "initial_cash": p.initial_cash, "strategy_id": p.strategy_id} for p in rows]
+    return [_portfolio_out(p) for p in rows]
 
 
 @router.post("")
 def create_portfolio(payload: PortfolioCreate, user: User = Depends(get_current_user),
                      db: Session = Depends(get_db)):
-    if payload.broker not in ("sim", "alpaca_paper"):
-        raise HTTPException(422, "broker must be 'sim' or 'alpaca_paper'")
-    if payload.broker == "alpaca_paper" and not get_settings().alpaca_api_key:
-        raise HTTPException(409, "Alpaca keys not configured — set ALPACA_API_KEY / ALPACA_SECRET_KEY or use the sim broker")
+    if payload.kind not in ("paper", "real_tracked"):
+        raise HTTPException(422, "kind must be 'paper' or 'real_tracked'")
+    if payload.kind == "paper":
+        if payload.broker not in ("sim", "alpaca_paper"):
+            raise HTTPException(422, "broker must be 'sim' or 'alpaca_paper'")
+        if payload.broker == "alpaca_paper" and not get_settings().alpaca_api_key:
+            raise HTTPException(409, "Alpaca keys not configured — set ALPACA_API_KEY / ALPACA_SECRET_KEY or use the sim broker")
+        broker = payload.broker
+        name = payload.name or "Paper Portfolio"
+    else:
+        broker = "none"  # real portfolios are tracked, never traded from here
+        name = payload.name or "Real Portfolio (tracked)"
     if payload.strategy_id is not None:
         strategy_service.get_strategy(db, user.id, payload.strategy_id)  # ownership check
-    p = Portfolio(user_id=user.id, name=payload.name, broker=payload.broker, mode="paper",
-                  initial_cash=payload.initial_cash, cash=payload.initial_cash,
+    p = Portfolio(user_id=user.id, name=name, kind=payload.kind, broker=broker, mode="paper",
+                  initial_cash=payload.initial_cash, cash=payload.initial_cash if payload.kind == "paper" else 0.0,
                   strategy_id=payload.strategy_id)
     db.add(p)
     db.flush()
     audit(db, "portfolio.created", user_id=user.id, entity="portfolio", entity_id=p.id,
-          payload={"broker": p.broker, "initial_cash": p.initial_cash})
+          payload={"kind": p.kind, "broker": p.broker, "initial_cash": p.initial_cash})
     db.commit()
-    return {"id": p.id, "name": p.name, "broker": p.broker, "mode": p.mode}
+    return _portfolio_out(p)
+
+
+# --------------------------------------------------- real portfolio holdings (manual)
+
+def _require_real(p: Portfolio) -> None:
+    if p.kind != "real_tracked":
+        raise HTTPException(409, "Holdings can only be edited on a real (tracked) portfolio — paper positions come from filled orders")
+
+
+@router.post("/{portfolio_id}/holdings")
+def upsert_holding(portfolio_id: int, payload: HoldingUpsert,
+                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models import Position
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    _require_real(p)
+    symbol = payload.symbol.strip().upper()
+    if not symbol or payload.qty <= 0 or payload.avg_entry_price <= 0:
+        raise HTTPException(422, "symbol, positive qty and positive avg_entry_price required")
+    pos = db.scalar(select(Position).where(Position.portfolio_id == p.id, Position.symbol == symbol))
+    if pos is None:
+        pos = Position(portfolio_id=p.id, symbol=symbol)
+        db.add(pos)
+    pos.qty = payload.qty
+    pos.avg_entry_price = payload.avg_entry_price
+    audit(db, "holding.upserted", user_id=user.id, entity="position", entity_id=symbol,
+          payload={"portfolio_id": p.id, "qty": payload.qty, "avg_entry_price": payload.avg_entry_price})
+    db.commit()
+    return {"ok": True, "symbol": symbol}
+
+
+@router.delete("/{portfolio_id}/holdings/{symbol}")
+def delete_holding(portfolio_id: int, symbol: str,
+                   user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.models import Position
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    _require_real(p)
+    pos = db.scalar(select(Position).where(Position.portfolio_id == p.id,
+                                           Position.symbol == symbol.upper()))
+    if pos is None:
+        raise HTTPException(404, "Holding not found")
+    db.delete(pos)
+    audit(db, "holding.deleted", user_id=user.id, entity="position", entity_id=symbol.upper(),
+          payload={"portfolio_id": p.id})
+    db.commit()
+    return {"ok": True}
 
 
 @router.get("/{portfolio_id}/summary")
@@ -84,6 +148,8 @@ def equity(portfolio_id: int, user: User = Depends(get_current_user), db: Sessio
 def create_proposal(portfolio_id: int, payload: ProposalCreate,
                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    if p.kind != "paper":
+        raise HTTPException(403, "This is a REAL (tracked) portfolio — the app never trades real holdings. Use your paper portfolio.")
     if p.strategy_id is None:
         raise HTTPException(409, "Portfolio has no linked strategy — link one to enable trading")
     if payload.side not in ("buy", "sell"):

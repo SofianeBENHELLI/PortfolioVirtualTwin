@@ -15,10 +15,24 @@ logging.basicConfig(level=logging.INFO)
 settings = get_settings()
 
 
+def _micro_migrations() -> None:
+    """Tiny additive migrations for dev DBs created before a column existed.
+    (Real migrations move to Alembic once the schema stabilizes.)"""
+    from sqlalchemy import inspect, text
+
+    inspector = inspect(engine)
+    if "portfolios" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("portfolios")}
+        if "kind" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE portfolios ADD COLUMN kind VARCHAR(12) DEFAULT 'paper'"))
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import app.models  # noqa: F401 — register all tables
     Base.metadata.create_all(engine)
+    _micro_migrations()
     bus.set_loop(asyncio.get_running_loop())
     task = asyncio.create_task(monitor_loop())
     yield

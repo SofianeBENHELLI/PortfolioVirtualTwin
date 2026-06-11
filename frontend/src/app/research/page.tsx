@@ -60,10 +60,11 @@ export default function ResearchDesk() {
   async function generateProposals() {
     setPropBusy(true); setError(""); setInfo("");
     try {
-      const portfolios = await api<{ id: number }[]>("/api/portfolios");
-      if (portfolios.length === 0) throw new Error("Create a portfolio first (Trading Console)");
+      const portfolios = await api<{ id: number; kind: string }[]>("/api/portfolios");
+      const paper = portfolios.find((p) => p.kind === "paper");
+      if (!paper) throw new Error("Create a paper portfolio first (Trading Console)");
       const r = await api<{ created_proposal_ids: number[] }>("/api/agents/proposals", {
-        method: "POST", body: JSON.stringify({ portfolio_id: portfolios[0].id }),
+        method: "POST", body: JSON.stringify({ portfolio_id: paper.id }),
       });
       setInfo(r.created_proposal_ids.length > 0
         ? `${r.created_proposal_ids.length} proposal(s) created and risk-checked — review them in the Trading Console.`

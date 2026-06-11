@@ -42,14 +42,21 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [realEquity, setRealEquity] = useState<number | null>(null);
   const [alertCount, setAlertCount] = useState(0);
 
   const refresh = useCallback(async () => {
     try {
-      const portfolios = await api<{ id: number }[]>("/api/portfolios");
-      if (portfolios.length > 0) {
-        setSummary(await api<Summary>(`/api/portfolios/${portfolios[0].id}/summary`));
+      const portfolios = await api<{ id: number; kind: string }[]>("/api/portfolios");
+      const paper = portfolios.find((p) => p.kind === "paper");
+      if (paper) {
+        setSummary(await api<Summary>(`/api/portfolios/${paper.id}/summary`));
       }
+      const real = portfolios.find((p) => p.kind === "real_tracked");
+      if (real) {
+        const rs = await api<Summary>(`/api/portfolios/${real.id}/summary`);
+        setRealEquity(rs.equity);
+      } else setRealEquity(null);
       const alerts = await api<{ acknowledged: boolean }[]>("/api/alerts");
       setAlertCount(alerts.filter((a) => !a.acknowledged).length);
     } catch {}
@@ -113,6 +120,12 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
               <span className="text-zinc-500">drawdown {summary.drawdown_pct.toFixed(1)}%</span>
               <span className="text-zinc-500">{summary.open_orders} open orders</span>
             </>
+          )}
+          {realEquity != null && (
+            <span className="flex items-center gap-1.5 text-zinc-600">
+              <Badge className="bg-emerald-600 hover:bg-emerald-600">REAL</Badge>
+              {fmtMoney(realEquity)} <span className="text-xs text-zinc-400">(tracked)</span>
+            </span>
           )}
           <span className="ml-auto text-zinc-400 text-xs">No real money. Agents propose — you approve.</span>
         </header>

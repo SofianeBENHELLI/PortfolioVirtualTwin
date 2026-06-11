@@ -80,10 +80,11 @@ export default function MyStocks() {
       setLlm(status.llm_available);
       const strategies = await api<{ id: number }[]>("/api/strategies");
       setStrategyId(strategies[0]?.id ?? null);
-      const portfolios = await api<{ id: number }[]>("/api/portfolios");
-      if (portfolios.length > 0) {
+      const portfolios = await api<{ id: number; kind: string }[]>("/api/portfolios");
+      const paper = portfolios.find((p) => p.kind === "paper");
+      if (paper) {
         const s = await api<{ positions: { symbol: string; qty: number }[] }>(
-          `/api/portfolios/${portfolios[0].id}/summary`);
+          `/api/portfolios/${paper.id}/summary`);
         setHeld(Object.fromEntries(s.positions.map((p) => [p.symbol, p.qty])));
       }
     } catch (e) { setError(e instanceof Error ? e.message : "load failed"); }

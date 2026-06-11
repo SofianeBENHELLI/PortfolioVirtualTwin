@@ -27,9 +27,9 @@ export default function RiskCockpit() {
 
   const load = useCallback(async () => {
     try {
-      const portfolios = await api<{ id: number }[]>("/api/portfolios");
-      if (portfolios.length > 0)
-        setSummary(await api(`/api/portfolios/${portfolios[0].id}/summary`));
+      const portfolios = await api<{ id: number; kind: string }[]>("/api/portfolios");
+      const paper = portfolios.find((p) => p.kind === "paper");
+      if (paper) setSummary(await api(`/api/portfolios/${paper.id}/summary`));
       setAlerts(await api("/api/alerts"));
     } catch (e) { setError(e instanceof Error ? e.message : "load failed"); }
   }, []);

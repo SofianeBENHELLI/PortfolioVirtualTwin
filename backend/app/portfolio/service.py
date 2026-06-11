@@ -32,7 +32,10 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
     equity = portfolio.cash + positions_value
     unrealized = sum(p["unrealized_pnl"] for p in pos)
     realized = sum(p["realized_pnl"] for p in pos) + _closed_realized(db, portfolio)
-    total_pnl = equity - portfolio.initial_cash
+    # real (tracked) portfolios have no cash leg here — P&L is measured against cost basis
+    cost_basis = sum(p["qty"] * p["avg_entry_price"] for p in pos)
+    baseline = cost_basis if portfolio.kind == "real_tracked" else portfolio.initial_cash
+    total_pnl = equity - baseline
 
     snaps = db.scalars(
         select(PortfolioSnapshot).where(PortfolioSnapshot.portfolio_id == portfolio.id)
@@ -45,7 +48,7 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
 
     today_start = datetime.combine(datetime.now(timezone.utc).date(), time.min)
     prev = next((s for s in reversed(snaps) if s.as_of < today_start), None)
-    day_base = prev.equity if prev else portfolio.initial_cash
+    day_base = prev.equity if prev else baseline
     daily_pnl = equity - day_base
 
     daily_rets = _daily_returns(snaps)
@@ -69,9 +72,10 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
 
     return {
         "portfolio_id": portfolio.id, "name": portfolio.name, "mode": portfolio.mode,
+        "kind": portfolio.kind,
         "broker": portfolio.broker, "cash": portfolio.cash, "positions_value": positions_value,
-        "equity": equity, "initial_cash": portfolio.initial_cash,
-        "total_pnl": total_pnl, "total_pnl_pct": total_pnl / portfolio.initial_cash * 100,
+        "equity": equity, "initial_cash": portfolio.initial_cash, "cost_basis": cost_basis,
+        "total_pnl": total_pnl, "total_pnl_pct": total_pnl / baseline * 100 if baseline else 0.0,
         "daily_pnl": daily_pnl, "daily_pnl_pct": daily_pnl / day_base * 100 if day_base else 0.0,
         "unrealized_pnl": unrealized, "realized_pnl": realized,
         "drawdown_pct": drawdown_pct, "max_drawdown_pct": max_dd_pct,

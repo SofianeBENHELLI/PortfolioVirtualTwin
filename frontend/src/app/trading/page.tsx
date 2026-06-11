@@ -20,7 +20,7 @@ type Order = {
   order_type: string; filled_qty: number; filled_avg_price: number | null; created_at: string;
 };
 type Execution = { id: number; event: string; detail: Record<string, unknown>; created_at: string };
-type PortfolioRow = { id: number; name: string; broker: string; strategy_id: number | null };
+type PortfolioRow = { id: number; kind: string; name: string; broker: string; strategy_id: number | null };
 
 const STATUS_COLOR: Record<string, string> = {
   risk_passed: "bg-blue-600", risk_blocked: "bg-red-600", approved: "bg-indigo-600",
@@ -59,8 +59,9 @@ export default function TradingConsole() {
     try {
       const ps = await api<PortfolioRow[]>("/api/portfolios");
       setStrategies(await api("/api/strategies"));
-      if (ps.length === 0) { setPortfolio(null); return; }
-      const p = ps[0];
+      const papers = ps.filter((x) => x.kind === "paper");
+      if (papers.length === 0) { setPortfolio(null); return; }
+      const p = papers[0];
       setPortfolio(p);
       setProposals(await api(`/api/portfolios/${p.id}/proposals`));
       setOrders(await api(`/api/portfolios/${p.id}/orders`));
@@ -163,8 +164,12 @@ export default function TradingConsole() {
   return (
     <div className="space-y-6">
       <h1 className="text-2xl font-bold">Paper Trading Console
+        <Badge className="ml-3 align-middle bg-amber-500 text-black hover:bg-amber-500">PAPER ONLY</Badge>
         <span className="ml-3 text-sm font-normal text-zinc-500">broker: {portfolio.broker}</span>
       </h1>
+      <p className="text-sm text-zinc-500 -mt-4">
+        Orders here only ever touch your simulated portfolio. Your real (tracked) portfolio is read-only by design.
+      </p>
 
       <Card>
         <CardHeader><CardTitle className="text-base">New order proposal</CardTitle></CardHeader>
