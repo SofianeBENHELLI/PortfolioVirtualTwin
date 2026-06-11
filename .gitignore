@@ -1,0 +1,17 @@
+# python
+__pycache__/
+*.pyc
+.venv/
+backend/pvt.db
+backend/reports/
+backend/.env
+
+# node / next
+node_modules/
+.next/
+frontend/.env.local
+
+# misc
+.env
+.DS_Store
+.claude/
