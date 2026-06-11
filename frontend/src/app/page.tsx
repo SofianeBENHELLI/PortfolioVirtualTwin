@@ -29,6 +29,8 @@ type Readiness = { armed: boolean; all_passed: boolean;
   checks: { name: string; passed: boolean; detail: string }[] };
 type MacroStrip = { indicators: Record<string, { label: string; value: number; chg_1d_pct: number }>;
   regimes: Record<string, unknown> };
+type Signal = { signal_strength: number; created_at: string };
+type SignalMap = Record<string, { bull?: Signal; bear?: Signal }>;
 
 function Kpi({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
@@ -40,13 +42,32 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
   );
 }
 
-function PositionsTable({ positions, best, worst }: { positions: Position[]; best: string | null; worst: string | null }) {
+function SignalChips({ s }: { s?: { bull?: Signal; bear?: Signal } }) {
+  if (!s || (!s.bull && !s.bear)) return <span className="text-xs text-zinc-300">—</span>;
+  return (
+    <span className="inline-flex gap-1">
+      {s.bull && (
+        <span className={`rounded px-1 text-xs font-medium ${s.bull.signal_strength >= 60 ? "bg-emerald-600 text-white" : "bg-emerald-100 text-emerald-800"}`}>
+          🐂{s.bull.signal_strength.toFixed(0)}</span>
+      )}
+      {s.bear && (
+        <span className={`rounded px-1 text-xs font-medium ${s.bear.signal_strength >= 60 ? "bg-red-600 text-white" : "bg-red-100 text-red-800"}`}>
+          🐻{s.bear.signal_strength.toFixed(0)}</span>
+      )}
+    </span>
+  );
+}
+
+function PositionsTable({ positions, best, worst, signals }: {
+  positions: Position[]; best: string | null; worst: string | null; signals: SignalMap;
+}) {
   return (
     <Table>
       <TableHeader>
         <TableRow>
           <TableHead>Symbol</TableHead><TableHead>Qty</TableHead><TableHead>Entry</TableHead>
           <TableHead>Price</TableHead><TableHead>Value</TableHead><TableHead>Unrealized</TableHead>
+          <TableHead title="latest Bull / Bear agent signals">🐂🐻</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
@@ -63,10 +84,11 @@ function PositionsTable({ positions, best, worst }: { positions: Position[]; bes
             <TableCell className={pnlColor(p.unrealized_pnl)}>
               {fmtMoney(p.unrealized_pnl)} ({fmtPct(p.unrealized_pnl_pct, 1)})
             </TableCell>
+            <TableCell><SignalChips s={signals[p.symbol]} /></TableCell>
           </TableRow>
         ))}
         {positions.length === 0 && (
-          <TableRow><TableCell colSpan={6} className="text-zinc-400">No positions</TableCell></TableRow>
+          <TableRow><TableCell colSpan={7} className="text-zinc-400">No positions</TableCell></TableRow>
         )}
       </TableBody>
     </Table>
@@ -79,8 +101,12 @@ export default function Dashboard() {
   const [realRow, setRealRow] = useState<PortfolioRow | null>(null);
   const [readiness, setReadiness] = useState<Readiness | null>(null);
   const [macro, setMacro] = useState<MacroStrip | null>(null);
+  const [signals, setSignals] = useState<SignalMap>({});
   const [hasReal, setHasReal] = useState(true);
   const [armBusy, setArmBusy] = useState(false);
+  const [bbBusy, setBbBusy] = useState<number | null>(null);
+  const [llm, setLlm] = useState(false);
+  const [info, setInfo] = useState("");
   const [paperEquity, setPaperEquity] = useState<{ dates: string[]; equity: number[] }>({ dates: [], equity: [] });
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
@@ -111,9 +137,32 @@ export default function Dashboard() {
       try {
         const m = await api<{ snapshot: MacroStrip | null }>("/api/macro");
         setMacro(m.snapshot);
+        const status = await api<{ llm_available: boolean }>("/api/agents/status");
+        setLlm(status.llm_available);
       } catch {}
     } catch (e) { setError(e instanceof Error ? e.message : "load failed"); }
   }, []);
+
+  // latest bull/bear signals for every held symbol (paper + real)
+  useEffect(() => {
+    const syms = [...new Set([...(paper?.positions ?? []), ...(real?.positions ?? [])]
+      .map((p) => p.symbol))];
+    if (syms.length === 0) return;
+    api<SignalMap>(`/api/watchlist/signals?symbols=${syms.join(",")}`)
+      .then(setSignals).catch(() => {});
+  }, [paper, real]);
+
+  async function bullBearHoldings(portfolioId: number) {
+    setBbBusy(portfolioId); setError(""); setInfo("");
+    try {
+      const r = await api<{ summary: string }>("/api/watchlist/bullbear", {
+        method: "POST", body: JSON.stringify({ portfolio_id: portfolioId }),
+      });
+      setInfo(r.summary);
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : "agents failed"); }
+    finally { setBbBusy(null); }
+  }
 
   async function toggleArm() {
     if (!realRow) return;
@@ -180,6 +229,7 @@ export default function Dashboard() {
         </Button>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}
+      {info && <p className="text-sm text-blue-700">{info}</p>}
 
       {macro && (
         <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border bg-white px-4 py-2 text-sm">
@@ -208,10 +258,18 @@ export default function Dashboard() {
 
       {/* ------------------------------------------------ PAPER ------------- */}
       <section className="rounded-xl border-2 border-amber-300 bg-amber-50/40 p-4 space-y-4">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Badge className="bg-amber-500 text-black hover:bg-amber-500">PAPER — SIMULATED</Badge>
           <span className="font-semibold">{paper?.name ?? "Paper portfolio"}</span>
           {paper && <span className="text-sm text-zinc-500">broker: {paper.broker}</span>}
+          {paper && paper.n_positions > 0 && (
+            <Button size="sm" variant="outline" className="border-purple-300 text-purple-700"
+              onClick={() => bullBearHoldings(paper.portfolio_id)}
+              disabled={bbBusy !== null || !llm}
+              title="Run the Bull & Bear agents on every paper holding">
+              {bbBusy === paper.portfolio_id ? "Debating…" : "🐂🐻 Bull & Bear my holdings"}
+            </Button>
+          )}
           <span className="ml-auto text-xs text-zinc-500">Traded by you via the approval pipeline. Not real money.</span>
         </div>
         {paper ? (
@@ -235,7 +293,8 @@ export default function Dashboard() {
               <Card>
                 <CardHeader><CardTitle className="text-base">Paper positions ({paper.n_positions})</CardTitle></CardHeader>
                 <CardContent>
-                  <PositionsTable positions={paper.positions} best={paper.best_position} worst={paper.worst_position} />
+                  <PositionsTable positions={paper.positions} best={paper.best_position}
+                    worst={paper.worst_position} signals={signals} />
                 </CardContent>
               </Card>
             </div>
@@ -247,11 +306,19 @@ export default function Dashboard() {
 
       {/* ------------------------------------------------ REAL -------------- */}
       <section className="rounded-xl border-2 border-emerald-300 bg-emerald-50/40 p-4 space-y-4">
-        <div className="flex items-center gap-3">
+        <div className="flex items-center gap-3 flex-wrap">
           <Badge className="bg-emerald-600 hover:bg-emerald-600">REAL — TRACKED ONLY</Badge>
           <span className="font-semibold">{real?.name ?? "Your real portfolio"}</span>
+          {real && real.n_positions > 0 && (
+            <Button size="sm" variant="outline" className="border-purple-300 text-purple-700"
+              onClick={() => bullBearHoldings(real.portfolio_id)}
+              disabled={bbBusy !== null || !llm}
+              title="Run the Bull & Bear agents on every real holding">
+              {bbBusy === real.portfolio_id ? "Debating…" : "🐂🐻 Bull & Bear my holdings"}
+            </Button>
+          )}
           <span className="ml-auto text-xs text-zinc-500">
-            Mirror of your actual brokerage account. This app can NEVER trade it.
+            Mirror of your actual brokerage account. The app manages orders; it never sends them to a broker API.
           </span>
         </div>
         {!hasReal ? (
@@ -307,7 +374,8 @@ export default function Dashboard() {
                   <TableHeader>
                     <TableRow>
                       <TableHead>Symbol</TableHead><TableHead>Qty</TableHead><TableHead>Avg entry</TableHead>
-                      <TableHead>Price</TableHead><TableHead>Value</TableHead><TableHead>Unrealized</TableHead><TableHead />
+                      <TableHead>Price</TableHead><TableHead>Value</TableHead><TableHead>Unrealized</TableHead>
+                      <TableHead title="latest Bull / Bear agent signals">🐂🐻</TableHead><TableHead />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
@@ -321,6 +389,7 @@ export default function Dashboard() {
                         <TableCell className={pnlColor(p.unrealized_pnl)}>
                           {fmtMoney(p.unrealized_pnl)} ({fmtPct(p.unrealized_pnl_pct, 1)})
                         </TableCell>
+                        <TableCell><SignalChips s={signals[p.symbol]} /></TableCell>
                         <TableCell>
                           <button onClick={() => removeHolding(p.symbol)} title="Remove"
                             className="text-zinc-400 hover:text-red-600">✕</button>
@@ -328,7 +397,7 @@ export default function Dashboard() {
                       </TableRow>
                     ))}
                     {real.positions.length === 0 && (
-                      <TableRow><TableCell colSpan={7} className="text-zinc-400">
+                      <TableRow><TableCell colSpan={8} className="text-zinc-400">
                         No holdings yet — add what you actually own below.
                       </TableCell></TableRow>
                     )}

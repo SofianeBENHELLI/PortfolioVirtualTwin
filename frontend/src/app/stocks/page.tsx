@@ -117,11 +117,12 @@ export default function MyStocks() {
     finally { setBusyData(false); }
   }
 
-  async function runBullBear() {
+  async function runBullBear(symbols: string[] = []) {
     setBusyAgents(true); setError(""); setInfo("");
+    if (symbols.length > 0) setInfo(`Bull & Bear debating ${symbols.join(", ")}…`);
     try {
       const r = await api<{ summary: string; tokens: number }>("/api/watchlist/bullbear", {
-        method: "POST", body: JSON.stringify({ strategy_id: strategyId }),
+        method: "POST", body: JSON.stringify({ strategy_id: strategyId, symbols }),
       });
       setInfo(`${r.summary} (${r.tokens} tokens)`);
       load();
@@ -141,9 +142,10 @@ export default function MyStocks() {
         <Button onClick={refreshData} disabled={busyData || stocks.length === 0}>
           {busyData ? "Fetching…" : "⟳ Update open-source data"}
         </Button>
-        <Button onClick={runBullBear} disabled={busyAgents || !llm || stocks.length === 0}
-          className="bg-purple-700 hover:bg-purple-800">
-          {busyAgents ? "Debating… (≈30s)" : "🐂🐻 Run Bull & Bear agents"}
+        <Button onClick={() => runBullBear()} disabled={busyAgents || !llm || stocks.length === 0}
+          className="bg-purple-700 hover:bg-purple-800"
+          title="Debate every tracked stock">
+          {busyAgents ? "Debating… (≈30s)" : "🐂🐻 Bull & Bear: all tracked"}
         </Button>
       </div>
 
@@ -176,6 +178,11 @@ export default function MyStocks() {
                   <div className="ml-auto flex items-center gap-2">
                     <SignalBadge kind="bull" signal={s.bull} />
                     <SignalBadge kind="bear" signal={s.bear} />
+                    <button onClick={() => runBullBear([s.symbol])} disabled={busyAgents || !llm}
+                      title={`Run Bull & Bear for ${s.symbol} only`}
+                      className="rounded border border-purple-300 px-1.5 py-0.5 text-xs text-purple-700 hover:bg-purple-50 disabled:opacity-40">
+                      🐂🐻 run
+                    </button>
                     <button onClick={() => setExpanded(isOpen ? null : s.symbol)}
                       className="text-sm text-blue-600 hover:underline">{isOpen ? "Close" : "Details"}</button>
                     <button onClick={() => remove(s.symbol)} title="Stop tracking"

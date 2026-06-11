@@ -24,7 +24,9 @@ class AddSymbol(BaseModel):
 
 class BullBearRequest(BaseModel):
     strategy_id: int | None = None  # optional: only adds style/horizon context
-    symbols: list[str] = []  # default: whole watchlist
+    symbols: list[str] = []         # explicit subset (e.g. a single stock)
+    portfolio_id: int | None = None  # analyze the holdings of this portfolio
+    # precedence: symbols > portfolio_id > whole watchlist
 
 
 def _latest_signals(db: Session, user_id: int, symbols: list[str]) -> dict[str, dict]:
@@ -74,6 +76,16 @@ def _payload(db: Session, user_id: int, watched: list[WatchedStock]) -> list[dic
             "bear": signals.get(w.symbol, {}).get("bear"),
         })
     return out
+
+
+@router.get("/signals")
+def signals(symbols: str, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """Latest bull/bear signal per symbol — works for any symbols (e.g. portfolio
+    holdings), not just tracked ones."""
+    syms = [s.strip().upper() for s in symbols.split(",") if s.strip()][:50]
+    if not syms:
+        raise HTTPException(422, "symbols query param required (comma-separated)")
+    return _latest_signals(db, user.id, syms)
 
 
 @router.get("")
@@ -158,6 +170,14 @@ def bull_bear(payload: BullBearRequest, user: User = Depends(get_current_user), 
         twin = StrategyTwin(strategy_name="(no strategy — general analysis)")
         version_id = None
     symbols = [s.upper() for s in payload.symbols]
+    if not symbols and payload.portfolio_id is not None:
+        from app.execution import service as exec_service
+        from app.models import Position
+        portfolio = exec_service.get_portfolio(db, user.id, payload.portfolio_id)
+        symbols = [p.symbol for p in db.scalars(
+            select(Position).where(Position.portfolio_id == portfolio.id, Position.qty > 0)).all()]
+        if not symbols:
+            raise HTTPException(409, f"'{portfolio.name}' has no holdings to analyze")
     if not symbols:
         symbols = [w.symbol for w in db.scalars(
             select(WatchedStock).where(WatchedStock.user_id == user.id)).all()]

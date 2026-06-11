@@ -82,3 +82,46 @@ def test_bullbear_strategy_is_optional(client, auth):
     client.post("/api/watchlist", json={"symbol": "AAPL"}, headers=auth)
     r = client.post("/api/watchlist/bullbear", json={}, headers=auth)
     assert r.status_code == 503
+
+
+def test_bullbear_portfolio_mode_resolves_holdings(client, auth, db, monkeypatch):
+    """portfolio_id mode analyzes the portfolio's holdings, not the watchlist."""
+    # real portfolio with two holdings; watchlist intentionally different
+    client.post("/api/watchlist", json={"symbol": "TSLA"}, headers=auth)
+    pid = client.post("/api/portfolios", json={"kind": "real_tracked"}, headers=auth).json()["id"]
+    for sym in ("AAPL", "NVDA"):
+        client.post(f"/api/portfolios/{pid}/holdings",
+                    json={"symbol": sym, "qty": 1, "avg_entry_price": 100.0}, headers=auth)
+    client.put("/api/auth/me/openai-key", json={"api_key": "sk-test-abcdefghijklmnop"}, headers=auth)
+
+    captured = {}
+    from app.routers import watchlist as wl
+    from app.models import AgentRun, User
+    def fake_run(db_, user_id, twin, version_id, symbols):
+        captured["symbols"] = sorted(symbols)
+        run = AgentRun(user_id=user_id, graph="bullbear", status="done", summary="ok")
+        db_.add(run); db_.commit()
+        return run
+    monkeypatch.setattr(wl, "run_bull_bear", fake_run)
+
+    r = client.post("/api/watchlist/bullbear", json={"portfolio_id": pid}, headers=auth)
+    assert r.status_code == 200
+    assert captured["symbols"] == ["AAPL", "NVDA"]  # holdings, not TSLA
+
+    # empty portfolio -> 409
+    pid2 = client.post("/api/portfolios", json={"kind": "real_tracked"}, headers=auth).json()["id"]
+    assert client.post("/api/watchlist/bullbear", json={"portfolio_id": pid2}, headers=auth).status_code == 409
+
+
+def test_signals_endpoint_for_arbitrary_symbols(client, auth, db):
+    from app.models import AgentRun, Recommendation, User
+    user = db.query(User).filter_by(email="w@example.com").one()
+    run = AgentRun(user_id=user.id, graph="bullbear", status="done")
+    db.add(run); db.flush()
+    db.add(Recommendation(agent_run_id=run.id, user_id=user.id, symbol="ZZZ", action="buy",
+                          confidence=0.8, thesis="t", invalidation="i",
+                          data_used={"perspective": "bull", "signal_strength": 80, "key_points": []}))
+    db.commit()
+    r = client.get("/api/watchlist/signals?symbols=ZZZ,YYY", headers=auth).json()
+    assert r["ZZZ"]["bull"]["signal_strength"] == 80
+    assert r["YYY"] == {}
