@@ -118,7 +118,6 @@ export default function MyStocks() {
   }
 
   async function runBullBear() {
-    if (!strategyId) { setError("Create a strategy first (Setup → My Strategy)"); return; }
     setBusyAgents(true); setError(""); setInfo("");
     try {
       const r = await api<{ summary: string; tokens: number }>("/api/watchlist/bullbear", {

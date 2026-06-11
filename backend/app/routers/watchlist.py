@@ -23,7 +23,7 @@ class AddSymbol(BaseModel):
 
 
 class BullBearRequest(BaseModel):
-    strategy_id: int
+    strategy_id: int | None = None  # optional: only adds style/horizon context
     symbols: list[str] = []  # default: whole watchlist
 
 
@@ -147,16 +147,23 @@ def refresh_data(user: User = Depends(get_current_user), db: Session = Depends(g
 
 @router.post("/bullbear")
 def bull_bear(payload: BullBearRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    """Run the Bull and Bear agents on tracked stocks (or an explicit subset)."""
+    """Run the Bull and Bear agents on tracked stocks (or an explicit subset).
+    A strategy is optional — it only adds style/horizon context to the prompts."""
     require_llm(db, user.id)
-    version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
+    if payload.strategy_id is not None:
+        version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
+        version_id = version.id
+    else:
+        from app.strategy.twin import StrategyTwin
+        twin = StrategyTwin(strategy_name="(no strategy — general analysis)")
+        version_id = None
     symbols = [s.upper() for s in payload.symbols]
     if not symbols:
         symbols = [w.symbol for w in db.scalars(
             select(WatchedStock).where(WatchedStock.user_id == user.id)).all()]
     if not symbols:
         raise HTTPException(409, "Watchlist is empty — add symbols first")
-    run = run_bull_bear(db, user.id, twin, version.id, symbols)
+    run = run_bull_bear(db, user.id, twin, version_id, symbols)
     if run.status == "failed":
         from app.agents.llm import friendly_llm_error
         raise HTTPException(502, f"Bull/Bear run failed: {friendly_llm_error(run.error)}")

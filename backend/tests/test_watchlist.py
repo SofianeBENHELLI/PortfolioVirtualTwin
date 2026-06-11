@@ -74,3 +74,11 @@ def test_bullbear_503_without_llm_key(client, auth):
     client.post("/api/watchlist", json={"symbol": "AAPL"}, headers=auth)
     r = client.post("/api/watchlist/bullbear", json={"strategy_id": 1}, headers=auth)
     assert r.status_code == 503  # no OPENAI_API_KEY in tests
+
+
+def test_bullbear_strategy_is_optional(client, auth):
+    """No strategy needed — request must get past validation (503 = stopped at the
+    LLM-key check, NOT 422/404 on strategy)."""
+    client.post("/api/watchlist", json={"symbol": "AAPL"}, headers=auth)
+    r = client.post("/api/watchlist/bullbear", json={}, headers=auth)
+    assert r.status_code == 503
