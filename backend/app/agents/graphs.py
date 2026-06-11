@@ -209,6 +209,11 @@ def run_research(db: Session, user_id: int, twin: StrategyTwin, version_id: int 
                                       "valuation_risk": a["valuation_risk"]}},
             ))
             n += 1
+        if n == 0:
+            errors = [a["error"] for a in out["analyses"].values() if "error" in a]
+            if errors:
+                _finish_run(db, run, "", out["pt"], out["ct"], status="failed", error=errors[0])
+                return run
         _finish_run(db, run, f"Analyzed {len(symbols)} symbols, produced {n} recommendations",
                     out["pt"], out["ct"])
         audit(db, "agent.research_done", user_id=user_id, actor="agent", entity="agent_run",
@@ -299,6 +304,7 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
         from app.agents.llm import require_llm
         model = get_chat_model(require_llm(db, user_id), temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
         pt = ct = n = 0
+        last_error = ""
         for sym, payload in data.items():
             for perspective, prompt_tpl, action in (("bull", BULL_PROMPT, "buy"), ("bear", BEAR_PROMPT, "sell")):
                 try:
@@ -326,8 +332,12 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                                    "signal_strength": case.signal_strength},
                     ))
                     n += 1
-                except Exception:
+                except Exception as exc:
+                    last_error = str(exc)
                     continue  # one bad symbol/perspective shouldn't kill the run
+        if n == 0 and last_error:
+            _finish_run(db, run, "", pt, ct, status="failed", error=last_error)
+            return run
         missing = [s for s in symbols if s not in data]
         summary = f"Bull & Bear debated {len(data)} stocks → {n} signals"
         if missing:

@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.agents import graphs
-from app.agents.llm import llm_available, require_llm
+from app.agents.llm import friendly_llm_error, require_llm
 from app.core.db import SessionLocal, get_db
 from app.core.events import bus
 from app.core.security import get_current_user
@@ -49,7 +49,7 @@ def capture(payload: CaptureRequest, user: User = Depends(get_current_user), db:
     try:
         twin, run = graphs.capture_strategy(db, user.id, payload.description, payload.current_twin)
     except ValueError as exc:
-        raise HTTPException(502, str(exc))
+        raise HTTPException(502, friendly_llm_error(str(exc)))
     return {"twin": twin.model_dump(mode="json"), "yaml": twin.to_yaml(), "agent_run_id": run.id}
 
 
@@ -63,7 +63,7 @@ def research(payload: ResearchRequest, user: User = Depends(get_current_user), d
     run = graphs.run_research(db, user.id, twin, version.id, symbols)  # synchronous-on-purpose for ≤10 symbols
     bus.publish("agent_run", {"id": run.id, "graph": "research", "status": run.status})
     if run.status == "failed":
-        raise HTTPException(502, f"Research run failed: {run.error}")
+        raise HTTPException(502, f"Research run failed: {friendly_llm_error(run.error)}")
     return _run_out(db, run)
 
 
@@ -85,7 +85,7 @@ def explain(payload: ExplainRequest, user: User = Depends(get_current_user), db:
     try:
         report = graphs.run_explain(db, user.id, portfolio)
     except Exception as exc:
-        raise HTTPException(502, f"Explain run failed: {exc}")
+        raise HTTPException(502, f"Explain run failed: {friendly_llm_error(str(exc))}")
     return {"id": report.id, "narrative": report.narrative, "stats": report.stats,
             "created_at": report.created_at.isoformat()}
 

@@ -82,7 +82,8 @@ def brief(db: Session = Depends(get_db), user: User = Depends(get_current_user))
     try:
         report = run_macro_brief(db, user.id, snap)
     except Exception as exc:
-        raise HTTPException(502, f"Macro brief failed: {exc}")
+        from app.agents.llm import friendly_llm_error
+        raise HTTPException(502, f"Macro brief failed: {friendly_llm_error(str(exc))}")
     return {"id": report.id, "narrative": report.narrative, "created_at": report.created_at.isoformat()}
 
 

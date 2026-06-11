@@ -158,6 +158,7 @@ def bull_bear(payload: BullBearRequest, user: User = Depends(get_current_user), 
         raise HTTPException(409, "Watchlist is empty — add symbols first")
     run = run_bull_bear(db, user.id, twin, version.id, symbols)
     if run.status == "failed":
-        raise HTTPException(502, f"Bull/Bear run failed: {run.error}")
+        from app.agents.llm import friendly_llm_error
+        raise HTTPException(502, f"Bull/Bear run failed: {friendly_llm_error(run.error)}")
     return {"agent_run_id": run.id, "summary": run.summary,
             "tokens": run.prompt_tokens + run.completion_tokens}

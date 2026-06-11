@@ -44,6 +44,24 @@ def get_chat_model(api_key: str, temperature: float = 0.2):
     return ChatOpenAI(model=s.openai_model, api_key=api_key, temperature=temperature)
 
 
+def friendly_llm_error(error: str) -> str:
+    """Translate raw OpenAI errors into actionable messages for the UI."""
+    e = error.lower()
+    if "insufficient_quota" in e or "exceeded your current quota" in e or "429" in e and "quota" in e:
+        return ("Your OpenAI account has no API credit. A ChatGPT Plus subscription does NOT "
+                "include API credits — add billing or prepaid credits at "
+                "platform.openai.com → Settings → Billing, then retry. (OpenAI said: quota exceeded)")
+    if "invalid_api_key" in e or "incorrect api key" in e or "401" in e:
+        return ("OpenAI rejected your API key as invalid — re-copy it from "
+                "platform.openai.com/api-keys and save it again in Settings.")
+    if "model_not_found" in e or "does not have access to model" in e:
+        return ("Your OpenAI project doesn't have access to the configured model — check the "
+                "project of your key, or set OPENAI_MODEL to one you can use (e.g. gpt-4o-mini).")
+    if "rate limit" in e or ("429" in e and "rate" in e):
+        return "OpenAI rate limit hit — wait a minute and retry, or run fewer symbols at once."
+    return error
+
+
 def usage_from(message) -> tuple[int, int]:
     meta = getattr(message, "usage_metadata", None) or {}
     return int(meta.get("input_tokens", 0)), int(meta.get("output_tokens", 0))
