@@ -31,6 +31,8 @@ KNOWN_METRICS = BACKTESTABLE_METRICS | {
     "quality_score", "valuation_risk", "news_sentiment", "earnings_quality",
     "revenue_growth", "margin_trend", "debt_to_ebitda", "analyst_revision_trend",
     "thesis_broken", "risk_score",
+    # macro/portfolio metrics — evaluable live by the monitor (hedge triggers)
+    "volatility_regime", "portfolio_beta", "sector_concentration",
 }
 
 
@@ -106,9 +108,11 @@ class HedgingPolicy(BaseModel):
 
 
 class ExecutionPolicy(BaseModel):
-    # SAFETY: literal type makes any other mode a validation error in MVP 1.
-    mode: Literal["paper_trading_only"] = "paper_trading_only"
-    broker: Literal["sim", "alpaca_paper"] = "sim"
+    # SAFETY: only these two modes exist; both require a human approval on every order
+    # (human_approval_required is the literal True — not configurable). live_with_approval
+    # additionally requires an armed real portfolio + typed CONFIRM + readiness checklist.
+    mode: Literal["paper_trading_only", "live_with_approval"] = "paper_trading_only"
+    broker: Literal["sim", "alpaca_paper", "manual"] = "sim"
     order_types: list[Literal["market", "limit"]] = ["market", "limit"]
     human_approval_required: Literal[True] = True
 

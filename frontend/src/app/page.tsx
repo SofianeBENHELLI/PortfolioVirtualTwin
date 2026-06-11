@@ -20,8 +20,15 @@ type Summary = {
   drawdown_pct: number; max_drawdown_pct: number; n_positions: number;
   best_position: string | null; worst_position: string | null; positions: Position[];
 };
-type PortfolioRow = { id: number; kind: string; name: string };
+type PortfolioRow = {
+  id: number; kind: string; name: string; live_armed?: boolean;
+  max_order_notional?: number; max_live_orders_per_day?: number;
+};
 type Report = { id: number; narrative: string; created_at: string };
+type Readiness = { armed: boolean; all_passed: boolean;
+  checks: { name: string; passed: boolean; detail: string }[] };
+type MacroStrip = { indicators: Record<string, { label: string; value: number; chg_1d_pct: number }>;
+  regimes: Record<string, unknown> };
 
 function Kpi({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
@@ -69,7 +76,11 @@ function PositionsTable({ positions, best, worst }: { positions: Position[]; bes
 export default function Dashboard() {
   const [paper, setPaper] = useState<Summary | null>(null);
   const [real, setReal] = useState<Summary | null>(null);
+  const [realRow, setRealRow] = useState<PortfolioRow | null>(null);
+  const [readiness, setReadiness] = useState<Readiness | null>(null);
+  const [macro, setMacro] = useState<MacroStrip | null>(null);
   const [hasReal, setHasReal] = useState(true);
+  const [armBusy, setArmBusy] = useState(false);
   const [paperEquity, setPaperEquity] = useState<{ dates: string[]; equity: number[] }>({ dates: [], equity: [] });
   const [report, setReport] = useState<Report | null>(null);
   const [error, setError] = useState("");
@@ -90,11 +101,29 @@ export default function Dashboard() {
         setPaper(await api<Summary>(`/api/portfolios/${paperP.id}/summary`));
         setPaperEquity(await api(`/api/portfolios/${paperP.id}/equity`));
       }
-      if (realP) setReal(await api<Summary>(`/api/portfolios/${realP.id}/summary`));
+      if (realP) {
+        setRealRow(realP);
+        setReal(await api<Summary>(`/api/portfolios/${realP.id}/summary`));
+        setReadiness(await api<Readiness>(`/api/portfolios/${realP.id}/readiness`));
+      }
       const reports = await api<Report[]>("/api/agents/reports");
       setReport(reports[0] ?? null);
+      try {
+        const m = await api<{ snapshot: MacroStrip | null }>("/api/macro");
+        setMacro(m.snapshot);
+      } catch {}
     } catch (e) { setError(e instanceof Error ? e.message : "load failed"); }
   }, []);
+
+  async function toggleArm() {
+    if (!realRow) return;
+    setArmBusy(true); setError("");
+    try {
+      await api(`/api/portfolios/${realRow.id}/${realRow.live_armed ? "disarm" : "arm"}`, { method: "POST" });
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : "arming failed"); }
+    finally { setArmBusy(false); }
+  }
 
   useEffect(() => {
     load();
@@ -151,6 +180,31 @@ export default function Dashboard() {
         </Button>
       </div>
       {error && <p className="text-sm text-red-600">{error}</p>}
+
+      {macro && (
+        <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg border bg-white px-4 py-2 text-sm">
+          <span className="text-xs uppercase tracking-wide text-zinc-400">Macro</span>
+          {["vix", "wti", "gold", "us10y"].map((k) => {
+            const ind = macro.indicators[k];
+            if (!ind) return null;
+            return (
+              <span key={k} className="tabular-nums">
+                {ind.label.split(" ")[0]} <b>{ind.value >= 100 ? ind.value.toFixed(0) : ind.value.toFixed(2)}</b>
+                <span className={ind.chg_1d_pct >= 0 ? "text-emerald-600" : "text-red-600"}>
+                  {" "}{ind.chg_1d_pct >= 0 ? "+" : ""}{ind.chg_1d_pct.toFixed(1)}%
+                </span>
+              </span>
+            );
+          })}
+          {macro.regimes.risk_off === true && <Badge className="bg-red-600">risk-off</Badge>}
+          {macro.regimes.volatility_regime === "high" && <Badge className="bg-red-600">high vol</Badge>}
+          {macro.regimes.volatility_regime === "elevated" && <Badge className="bg-amber-500">elevated vol</Badge>}
+          {macro.regimes.war_risk === "high" && <Badge className="bg-red-600">war risk</Badge>}
+          {macro.regimes.oil_shock === true && <Badge className="bg-amber-500">oil shock</Badge>}
+          {macro.regimes.gold_rush === true && <Badge className="bg-yellow-500 text-black">gold rush</Badge>}
+          <a href="/macro" className="ml-auto text-xs text-blue-600 hover:underline">Macro & World →</a>
+        </div>
+      )}
 
       {/* ------------------------------------------------ PAPER ------------- */}
       <section className="rounded-xl border-2 border-amber-300 bg-amber-50/40 p-4 space-y-4">
@@ -214,6 +268,38 @@ export default function Dashboard() {
               <Kpi label="Daily P&L" value={fmtMoney(real.daily_pnl)} sub={fmtPct(real.daily_pnl_pct)} color={pnlColor(real.daily_pnl)} />
               <Kpi label="Holdings" value={String(real.n_positions)} />
             </div>
+
+            <Card className={realRow?.live_armed ? "border-red-400" : ""}>
+              <CardHeader className="flex flex-row items-center justify-between">
+                <CardTitle className="text-base">
+                  Real trading {realRow?.live_armed
+                    ? <Badge className="ml-2 bg-red-600">ARMED</Badge>
+                    : <Badge variant="outline" className="ml-2">disarmed</Badge>}
+                </CardTitle>
+                <Button onClick={toggleArm} disabled={armBusy || (!realRow?.live_armed && !readiness?.all_passed)}
+                  variant={realRow?.live_armed ? "outline" : "default"}
+                  className={realRow?.live_armed ? "" : "bg-red-600 hover:bg-red-700"}>
+                  {armBusy ? "…" : realRow?.live_armed ? "Disarm" : "Arm real trading"}
+                </Button>
+              </CardHeader>
+              <CardContent className="space-y-2">
+                <p className="text-xs text-zinc-500">
+                  Arming lets order proposals through the risk gateway for this portfolio. The app still
+                  never calls a broker API: approved real orders wait for YOU to execute them at your
+                  broker and record the fill. Caps: {fmtMoney(realRow?.max_order_notional ?? 0)}/order,
+                  {" "}{realRow?.max_live_orders_per_day} orders/day (adjust in Trading Console via API).
+                </p>
+                <ul className="grid md:grid-cols-2 gap-x-6 gap-y-1 text-sm">
+                  {(readiness?.checks ?? []).map((c) => (
+                    <li key={c.name} className="flex gap-2">
+                      <span className={c.passed ? "text-emerald-600" : "text-red-600"}>{c.passed ? "✓" : "✗"}</span>
+                      <span className="font-mono text-xs pt-0.5">{c.name}</span>
+                      <span className="text-zinc-500 text-xs pt-0.5">{c.detail}</span>
+                    </li>
+                  ))}
+                </ul>
+              </CardContent>
+            </Card>
             <Card>
               <CardHeader><CardTitle className="text-base">Real holdings (entered by you)</CardTitle></CardHeader>
               <CardContent className="space-y-3">

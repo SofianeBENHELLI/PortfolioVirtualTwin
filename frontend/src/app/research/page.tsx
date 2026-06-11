@@ -7,8 +7,11 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
+import { RiskGauge } from "@/components/risk-widgets";
+
 type Rec = {
-  id: number; symbol: string; action: string; confidence: number; thesis: string;
+  id: number; symbol: string; action: string; confidence: number; risk_score: number | null;
+  thesis: string;
   invalidation: string; data_used: { scores?: Record<string, unknown> }; created_at: string;
 };
 type Run = {
@@ -116,6 +119,7 @@ export default function ResearchDesk() {
                   <Badge className={ACTION_COLOR[r.action] ?? "bg-zinc-500"}>{r.action.toUpperCase()}</Badge>
                   <span className="font-medium">{r.symbol}</span>
                   <span className="text-sm text-zinc-500">confidence {(r.confidence * 100).toFixed(0)}%</span>
+                  <RiskGauge score={r.risk_score} compact />
                   <span className="ml-auto text-xs text-zinc-400">{new Date(r.created_at).toLocaleString()}</span>
                 </div>
                 <p className="text-sm">{r.thesis}</p>

@@ -26,6 +26,15 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_secret_key: str = ""
 
+    # SAFETY: live API brokers stay unreachable unless this is explicitly enabled AND
+    # live keys are provided. The manual-execution broker never places API orders.
+    live_trading_enabled: bool = False
+    alpaca_live_api_key: str = ""
+    alpaca_live_secret_key: str = ""
+
+    fred_api_key: str = ""
+    macro_refresh_hours: int = 6
+
     market_data_provider: str = "yfinance"  # yfinance | alpaca
     quote_refresh_seconds: int = 60
     reports_dir: Path = BACKEND_DIR / "reports"

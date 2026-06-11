@@ -112,6 +112,7 @@ def reports(user: User = Depends(get_current_user), db: Session = Depends(get_db
 
 def _rec_out(r: Recommendation) -> dict:
     return {"id": r.id, "symbol": r.symbol, "action": r.action, "confidence": r.confidence,
+            "risk_score": r.risk_score,
             "thesis": r.thesis, "invalidation": r.invalidation, "data_used": r.data_used,
             "created_at": r.created_at.isoformat()}
 

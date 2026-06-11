@@ -5,9 +5,12 @@ structured, versioned, testable data — that drives AI research agents, backtes
 deterministic risk gateway, and simulated execution. You stay in control: agents propose,
 deterministic rules validate, **you approve**.
 
-> ⚠️ **MVP 1 is paper trading only.** There is no live-trading code path in this repository.
-> The Alpaca integration hardcodes `paper=True`; the strategy schema rejects any execution
-> mode other than `paper_trading_only`. Nothing here is financial advice.
+> ⚠️ **No API ever places a real order from this app.** Paper trading uses the simulator or
+> Alpaca's paper endpoint (`paper=True` hardcoded). Real-portfolio orders use a
+> *manual-execution* flow: armed portfolio + readiness checklist + risk gateway + typed
+> CONFIRM, then **you** execute at your broker and record the fill. A live API adapter
+> exists but is unreachable unless `LIVE_TRADING_ENABLED` + dedicated live keys are set.
+> Nothing here is financial advice.
 
 ## What it does
 
@@ -25,7 +28,17 @@ deterministic rules validate, **you approve**.
 6. **Paper trade** — internal fill simulator (zero setup) or Alpaca paper API, behind one
    broker interface. Every order passes ~11 deterministic risk gates first, then waits for
    your explicit approval.
-7. **Monitor** — portfolio dashboard (P&L, drawdown, exposure), risk cockpit (limits,
+7. **Trade for real — with guardrails** — the real portfolio can be armed (readiness
+   checklist) to route orders through the same risk gateway, with per-order notional caps,
+   daily order caps, typed CONFIRM approval, and a header kill switch. The app never calls
+   a broker API for real orders: you execute at your broker and record the fill
+   (API brokers plug into the same interface later; Alpaca-live adapter ships flag-gated OFF).
+8. **Macro & geopolitics** — VIX, oil, gold, rates, dollar + GPR geopolitical-risk index and
+   GDELT war-news intensity → deterministic regime flags (risk-off, oil shock, gold rush,
+   war risk) that damp position sizing in the gateway, plus an LLM macro briefing.
+9. **Risk everywhere** — deterministic 0-100 risk score (explainable factors) on every
+   recommendation and order; sliders for all strategy risk limits.
+10. **Monitor** — portfolio dashboard (P&L, drawdown, exposure), risk cockpit (limits,
    concentration, exit-rule alerts), AI daily briefing ("the portfolio gained because…"),
    and an append-only audit log of every state change.
 
@@ -77,13 +90,17 @@ cd backend && uv run pytest      # risk-gateway matrix, rule AST, sim broker, fu
 - **Agents never touch brokers.** Agent output is rows in `recommendations` /
   `order_proposals`. Only `app/execution/service.py` talks to brokers, and only after the
   risk gateway passed **and** a human approval row exists.
-- **Deterministic risk gateway** (`app/risk/gateway.py`): paper-mode, universe whitelist,
-  cash, position size, sector exposure, max positions, daily loss, drawdown, duplicates,
-  order frequency, no shorting. Every check is persisted per proposal — the UI shows exactly
-  why an order was allowed or blocked.
-- **Paper-only by construction**: `ExecutionPolicy.mode` is the literal type
-  `"paper_trading_only"`; `human_approval_required` is the literal `True`. Other values fail
-  validation. The Alpaca client is constructed with `paper=True`, not configuration.
+- **Deterministic risk gateway** (`app/risk/gateway.py`): 16 gates — kill switch, arming,
+  universe whitelist, cash, position size, sector exposure, max positions, daily loss,
+  drawdown, duplicates, order frequency, per-order notional cap, real-order frequency cap,
+  macro-regime damping, no shorting. Every check is persisted per proposal — the UI shows
+  exactly why an order was allowed or blocked.
+- **Real money behind layered consent**: readiness checklist (incl. mandatory stop-loss
+  rule) → explicit arming per portfolio → caps → typed `CONFIRM` per order → manual
+  execution at your broker → recorded fill. Header **kill switch** cancels all open orders
+  and disarms everything. `human_approval_required` is the literal `True` — not configurable.
+- **Macro-aware risk**: deterministic regime flags (VIX/oil/gold/GPR/GDELT) damp position
+  sizing in hostile regimes; the LLM macro agent only narrates, never computes flags.
 - **Append-only audit**: every state transition (proposal, risk run, approval, submit, fill,
   alert, version change) writes to `audit_log`.
 

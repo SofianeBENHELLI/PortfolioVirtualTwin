@@ -43,11 +43,25 @@ class ProposalCreate(BaseModel):
 class Decision(BaseModel):
     decision: str  # approved | rejected
     note: str = ""
+    confirm_text: str = ""  # must be 'CONFIRM' to approve real orders
+
+
+class CapsUpdate(BaseModel):
+    max_order_notional: float | None = None
+    max_live_orders_per_day: int | None = None
+    strategy_id: int | None = None
+
+
+class RecordFill(BaseModel):
+    filled_qty: float
+    fill_price: float
 
 
 def _portfolio_out(p: Portfolio) -> dict:
     return {"id": p.id, "name": p.name, "kind": p.kind, "broker": p.broker, "mode": p.mode,
-            "cash": p.cash, "initial_cash": p.initial_cash, "strategy_id": p.strategy_id}
+            "cash": p.cash, "initial_cash": p.initial_cash, "strategy_id": p.strategy_id,
+            "live_armed": p.live_armed, "max_order_notional": p.max_order_notional,
+            "max_live_orders_per_day": p.max_live_orders_per_day}
 
 
 @router.get("")
@@ -69,7 +83,9 @@ def create_portfolio(payload: PortfolioCreate, user: User = Depends(get_current_
         broker = payload.broker
         name = payload.name or "Paper Portfolio"
     else:
-        broker = "none"  # real portfolios are tracked, never traded from here
+        # real portfolios use the manual-execution broker: the app manages the order
+        # lifecycle, the user executes at their actual broker and records the fill
+        broker = "manual"
         name = payload.name or "Real Portfolio (tracked)"
     if payload.strategy_id is not None:
         strategy_service.get_strategy(db, user.id, payload.strategy_id)  # ownership check
@@ -148,8 +164,6 @@ def equity(portfolio_id: int, user: User = Depends(get_current_user), db: Sessio
 def create_proposal(portfolio_id: int, payload: ProposalCreate,
                     user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     p = exec_service.get_portfolio(db, user.id, portfolio_id)
-    if p.kind != "paper":
-        raise HTTPException(403, "This is a REAL (tracked) portfolio — the app never trades real holdings. Use your paper portfolio.")
     if p.strategy_id is None:
         raise HTTPException(409, "Portfolio has no linked strategy — link one to enable trading")
     if payload.side not in ("buy", "sell"):
@@ -185,7 +199,8 @@ def decide(portfolio_id: int, proposal_id: int, payload: Decision,
         raise HTTPException(404, "Proposal not found")
     if payload.decision not in ("approved", "rejected"):
         raise HTTPException(422, "decision must be approved or rejected")
-    proposal = exec_service.decide(db, user.id, proposal, payload.decision, payload.note)
+    proposal = exec_service.decide(db, user.id, proposal, payload.decision, payload.note,
+                                   confirm_text=payload.confirm_text)
     return proposal_out(db, proposal)
 
 
@@ -196,11 +211,97 @@ def proposal_out(db: Session, p: OrderProposal) -> dict:
         "id": p.id, "symbol": p.symbol, "side": p.side, "qty": p.qty,
         "order_type": p.order_type, "limit_price": p.limit_price, "status": p.status,
         "risk_passed": p.risk_passed, "rationale": p.rationale, "source": p.source,
+        "risk_score": p.risk_score, "risk_factors": p.risk_factors or {},
         "created_at": p.created_at.isoformat(),
         "risk_checks": [{"name": c.check_name, "passed": c.passed, "detail": c.detail,
                          "observed": c.observed, "limit": c.limit} for c in checks],
         "approval": {"decision": approval.decision, "note": approval.note} if approval else None,
     }
+
+
+# ----------------------------------------------- arming, readiness, caps, manual fills
+
+@router.get("/{portfolio_id}/readiness")
+def readiness(portfolio_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.risk.readiness import run_checklist
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    checks = run_checklist(db, p)
+    return {"armed": p.live_armed, "all_passed": all(c.passed for c in checks),
+            "checks": [{"name": c.name, "passed": c.passed, "detail": c.detail} for c in checks]}
+
+
+@router.post("/{portfolio_id}/arm")
+def arm(portfolio_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.risk.readiness import run_checklist
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    checks = run_checklist(db, p)
+    payload = {"checks": [{"name": c.name, "passed": c.passed} for c in checks]}
+    if not all(c.passed for c in checks):
+        audit(db, "portfolio.arm_refused", user_id=user.id, entity="portfolio", entity_id=p.id, payload=payload)
+        db.commit()
+        failed = [c for c in checks if not c.passed]
+        raise HTTPException(409, "Readiness checklist failed: " + "; ".join(f"{c.name}: {c.detail}" for c in failed))
+    p.live_armed = True
+    audit(db, "portfolio.armed", user_id=user.id, entity="portfolio", entity_id=p.id, payload=payload)
+    db.commit()
+    return _portfolio_out(p)
+
+
+@router.post("/{portfolio_id}/disarm")
+def disarm(portfolio_id: int, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    p.live_armed = False
+    audit(db, "portfolio.disarmed", user_id=user.id, entity="portfolio", entity_id=p.id)
+    db.commit()
+    return _portfolio_out(p)
+
+
+@router.patch("/{portfolio_id}")
+def update_caps(portfolio_id: int, payload: CapsUpdate,
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    p = exec_service.get_portfolio(db, user.id, portfolio_id)
+    changes: dict = {}
+    if payload.max_order_notional is not None:
+        if payload.max_order_notional <= 0:
+            raise HTTPException(422, "max_order_notional must be positive")
+        p.max_order_notional = payload.max_order_notional
+        changes["max_order_notional"] = payload.max_order_notional
+    if payload.max_live_orders_per_day is not None:
+        if payload.max_live_orders_per_day <= 0:
+            raise HTTPException(422, "max_live_orders_per_day must be positive")
+        p.max_live_orders_per_day = payload.max_live_orders_per_day
+        changes["max_live_orders_per_day"] = payload.max_live_orders_per_day
+    if payload.strategy_id is not None:
+        strategy_service.get_strategy(db, user.id, payload.strategy_id)
+        p.strategy_id = payload.strategy_id
+        changes["strategy_id"] = payload.strategy_id
+    if changes:
+        audit(db, "portfolio.updated", user_id=user.id, entity="portfolio", entity_id=p.id, payload=changes)
+        db.commit()
+    return _portfolio_out(p)
+
+
+@router.post("/{portfolio_id}/orders/{order_id}/record-fill")
+def record_fill(portfolio_id: int, order_id: int, payload: RecordFill,
+                user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    exec_service.get_portfolio(db, user.id, portfolio_id)
+    order = db.get(PaperOrder, order_id)
+    if order is None or order.portfolio_id != portfolio_id:
+        raise HTTPException(404, "Order not found")
+    order = exec_service.record_external_fill(db, user.id, order, payload.filled_qty, payload.fill_price)
+    return {"id": order.id, "status": order.status, "filled_qty": order.filled_qty,
+            "filled_avg_price": order.filled_avg_price}
+
+
+@router.post("/{portfolio_id}/orders/{order_id}/cancel")
+def cancel(portfolio_id: int, order_id: int,
+           user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    exec_service.get_portfolio(db, user.id, portfolio_id)
+    order = db.get(PaperOrder, order_id)
+    if order is None or order.portfolio_id != portfolio_id:
+        raise HTTPException(404, "Order not found")
+    order = exec_service.cancel_order(db, user.id, order)
+    return {"id": order.id, "status": order.status}
 
 
 # ------------------------------------------------------------------ orders & events

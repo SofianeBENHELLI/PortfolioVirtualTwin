@@ -8,11 +8,18 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { RiskSlider } from "@/components/risk-widgets";
 
 type Version = { id: number; version: number; comment: string; created_at: string };
+type RiskLimits = {
+  max_position_weight_pct: number; max_sector_weight_pct: number;
+  max_portfolio_drawdown_pct: number; max_daily_loss_pct: number;
+  max_number_of_positions: number; max_orders_per_day: number;
+  rebalance_frequency: string;
+};
 type StrategyDetail = {
   id: number; name: string; active_version_id: number;
-  active_version: { version: number; yaml: string } | null;
+  active_version: { version: number; yaml: string; twin: { risk_management: RiskLimits } & Record<string, unknown> } | null;
   versions: Version[];
   backtest_coverage?: { backtestable: string[]; agent_evaluated: string[] };
 };
@@ -24,15 +31,32 @@ export default function StrategyDetailPage() {
   const [comment, setComment] = useState("");
   const [error, setError] = useState("");
   const [saved, setSaved] = useState(false);
+  const [risk, setRisk] = useState<RiskLimits | null>(null);
+  const [riskSaving, setRiskSaving] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const d = await api<StrategyDetail>(`/api/strategies/${id}`);
       setDetail(d);
       setYamlText(d.active_version?.yaml ?? "");
+      if (d.active_version) setRisk({ ...d.active_version.twin.risk_management });
     } catch (e) { setError(e instanceof Error ? e.message : "load failed"); }
   }, [id]);
   useEffect(() => { load(); }, [load]);
+
+  async function saveRiskLimits() {
+    if (!detail?.active_version || !risk) return;
+    setRiskSaving(true); setError("");
+    try {
+      const twin = { ...detail.active_version.twin, risk_management: risk };
+      await api(`/api/strategies/${id}/versions`, {
+        method: "POST",
+        body: JSON.stringify({ twin, comment: "risk limits adjusted (sliders)" }),
+      });
+      load();
+    } catch (e) { setError(e instanceof Error ? e.message : "save failed"); }
+    finally { setRiskSaving(false); }
+  }
 
   async function saveVersion() {
     setError(""); setSaved(false);
@@ -71,6 +95,29 @@ export default function StrategyDetailPage() {
         </Card>
 
         <div className="space-y-6">
+          {risk && (
+            <Card>
+              <CardHeader><CardTitle className="text-base">Risk limits</CardTitle></CardHeader>
+              <CardContent className="space-y-4">
+                <RiskSlider label="Max position weight" value={risk.max_position_weight_pct}
+                  onChange={(v) => setRisk({ ...risk, max_position_weight_pct: v })} min={1} max={25} />
+                <RiskSlider label="Max sector weight" value={risk.max_sector_weight_pct}
+                  onChange={(v) => setRisk({ ...risk, max_sector_weight_pct: v })} min={10} max={100} step={5} />
+                <RiskSlider label="Max portfolio drawdown" value={risk.max_portfolio_drawdown_pct}
+                  onChange={(v) => setRisk({ ...risk, max_portfolio_drawdown_pct: v })} min={5} max={40} />
+                <RiskSlider label="Max daily loss" value={risk.max_daily_loss_pct}
+                  onChange={(v) => setRisk({ ...risk, max_daily_loss_pct: v })} min={1} max={10} step={0.5} />
+                <RiskSlider label="Max positions" value={risk.max_number_of_positions}
+                  onChange={(v) => setRisk({ ...risk, max_number_of_positions: v })} min={1} max={50} unit="" />
+                <RiskSlider label="Max orders / day" value={risk.max_orders_per_day}
+                  onChange={(v) => setRisk({ ...risk, max_orders_per_day: v })} min={1} max={50} unit="" />
+                <Button onClick={saveRiskLimits} disabled={riskSaving} className="w-full" variant="outline">
+                  {riskSaving ? "Saving…" : "Save limits as new version"}
+                </Button>
+                <p className="text-xs text-zinc-500">Enforced by the risk gateway on every order, paper and real.</p>
+              </CardContent>
+            </Card>
+          )}
           {detail.backtest_coverage && (
             <Card>
               <CardHeader><CardTitle className="text-base">Rule coverage</CardTitle></CardHeader>

@@ -40,6 +40,15 @@ def latest_prices_for(db: Session, portfolio: Portfolio, extra: list[str] = []) 
     return get_provider().latest_prices(sorted(symbols))
 
 
+def _symbol_volatility(db: Session, symbol: str) -> float | None:
+    from app.models import MarketDataSnapshot
+    snap = db.scalar(select(MarketDataSnapshot).where(MarketDataSnapshot.symbol == symbol))
+    if snap and snap.indicators:
+        v = snap.indicators.get("volatility_30d")
+        return float(v) if v is not None else None
+    return None
+
+
 def create_proposal(db: Session, user_id: int, portfolio: Portfolio, twin: StrategyTwin,
                     strategy_version_id: int | None, *, symbol: str, side: str, qty: float,
                     order_type: str = "market", limit_price: float | None = None,
@@ -58,21 +67,42 @@ def create_proposal(db: Session, user_id: int, portfolio: Portfolio, twin: Strat
     db.commit()
 
     prices = latest_prices_for(db, portfolio, extra=[proposal.symbol])
+
+    # deterministic risk score (explainable, persisted) — computed before the gateway verdict
+    from app.risk.gateway import build_state
+    from app.risk.scoring import compute_risk_score
+    state = build_state(db, portfolio, prices)
+    ref_price = proposal.limit_price if (proposal.order_type == "limit" and proposal.limit_price) else prices.get(proposal.symbol, 0.0)
+    score = compute_risk_score(state, twin, symbol=proposal.symbol, side=proposal.side,
+                               notional=proposal.qty * (ref_price or 0.0),
+                               symbol_volatility_30d=_symbol_volatility(db, proposal.symbol),
+                               macro_regimes=state.macro_regimes)
+    proposal.risk_score = score.score
+    proposal.risk_factors = {"band": score.band, "factors": score.factors}
+    db.commit()
+
     run_gateway(db, proposal, twin, portfolio, prices)
-    bus.publish("proposal", {"id": proposal.id, "status": proposal.status, "symbol": proposal.symbol})
+    bus.publish("proposal", {"id": proposal.id, "status": proposal.status, "symbol": proposal.symbol,
+                             "risk_score": proposal.risk_score})
     return proposal
 
 
-def decide(db: Session, user_id: int, proposal: OrderProposal, decision: str, note: str = "") -> OrderProposal:
-    """Human approval step. Approving a risk-passed proposal submits it to the paper broker."""
+def decide(db: Session, user_id: int, proposal: OrderProposal, decision: str, note: str = "",
+           confirm_text: str = "") -> OrderProposal:
+    """Human approval step. Approving a risk-passed proposal submits it to the broker.
+    Real portfolios additionally require the literal typed confirmation 'CONFIRM'."""
     if proposal.status not in ("risk_passed", "risk_blocked"):
         raise HTTPException(409, f"Proposal is '{proposal.status}', cannot decide")
     if decision == "approved" and proposal.status != "risk_passed":
         raise HTTPException(409, "Cannot approve a proposal that failed risk checks")
+    portfolio_for_check = db.get(Portfolio, proposal.portfolio_id)
+    if decision == "approved" and portfolio_for_check.kind == "real_tracked" and confirm_text != "CONFIRM":
+        raise HTTPException(428, "Real order: type CONFIRM to approve — this concerns your actual money")
 
     db.add(Approval(proposal_id=proposal.id, user_id=user_id, decision=decision, note=note))
     audit(db, f"order.{decision}", user_id=user_id, entity="order_proposal", entity_id=proposal.id,
-          payload={"note": note})
+          payload={"note": note, "typed_confirmation": confirm_text == "CONFIRM",
+                   "portfolio_kind": portfolio_for_check.kind})
 
     if decision == "rejected":
         proposal.status = "rejected"
@@ -139,15 +169,19 @@ def apply_fill(db: Session, order: PaperOrder, filled_qty: float, fill_price: fl
         db.flush()
 
     notional = filled_qty * fill_price
+    # real (tracked) portfolios: cash lives at the external broker — only positions move here
+    track_cash = portfolio.kind != "real_tracked"
     if order.side == "buy":
         total_cost = position.avg_entry_price * position.qty + notional
         position.qty += filled_qty
         position.avg_entry_price = total_cost / position.qty if position.qty else 0.0
-        portfolio.cash -= notional
+        if track_cash:
+            portfolio.cash -= notional
     else:
         position.realized_pnl += (fill_price - position.avg_entry_price) * filled_qty
         position.qty -= filled_qty
-        portfolio.cash += notional
+        if track_cash:
+            portfolio.cash += notional
         if position.qty <= 1e-9:
             position.qty = 0.0
 
@@ -170,6 +204,41 @@ def apply_fill(db: Session, order: PaperOrder, filled_qty: float, fill_price: fl
     db.commit()
     bus.publish("fill", {"order_id": order.id, "symbol": order.symbol, "side": order.side,
                          "qty": filled_qty, "price": fill_price})
+
+
+def record_external_fill(db: Session, user_id: int, order: PaperOrder, filled_qty: float,
+                         fill_price: float) -> PaperOrder:
+    """User reports how a manual (real) order was actually executed at their broker."""
+    if order.broker != "manual":
+        raise HTTPException(409, "Only manual-execution orders can have an externally recorded fill")
+    if order.status != "open":
+        raise HTTPException(409, f"Order is '{order.status}', nothing to record")
+    if filled_qty <= 0 or fill_price <= 0:
+        raise HTTPException(422, "filled_qty and fill_price must be positive")
+    if filled_qty > order.qty + 1e-9:
+        raise HTTPException(422, f"filled_qty exceeds order quantity ({order.qty})")
+    audit(db, "order.external_fill_recorded", user_id=user_id, entity="paper_order",
+          entity_id=order.id, payload={"qty": filled_qty, "price": fill_price})
+    apply_fill(db, order, filled_qty, fill_price)
+    return order
+
+
+def cancel_order(db: Session, user_id: int, order: PaperOrder, reason: str = "") -> PaperOrder:
+    if order.status != "open":
+        raise HTTPException(409, f"Order is '{order.status}', cannot cancel")
+    portfolio = db.get(Portfolio, order.portfolio_id)
+    get_broker(portfolio.broker).cancel(order.broker_order_id)
+    order.status = "cancelled"
+    db.add(ExecutionEvent(order_id=order.id, proposal_id=order.proposal_id, event="cancelled",
+                          detail={"reason": reason or "user cancelled"}))
+    proposal = db.get(OrderProposal, order.proposal_id)
+    if proposal:
+        proposal.status = "cancelled"
+    audit(db, "order.cancelled", user_id=user_id, entity="paper_order", entity_id=order.id,
+          payload={"reason": reason})
+    db.commit()
+    bus.publish("order", {"id": order.id, "status": "cancelled"})
+    return order
 
 
 def poll_open_orders(db: Session, portfolio: Portfolio) -> int:

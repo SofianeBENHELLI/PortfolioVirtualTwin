@@ -57,8 +57,15 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
     # concentration
     sectors: dict[str, str] = {}
     if pos:
-        for a in db.scalars(select(Asset).where(Asset.symbol.in_([p["symbol"] for p in pos]))):
+        symbols = [p["symbol"] for p in pos]
+        for a in db.scalars(select(Asset).where(Asset.symbol.in_(symbols))):
             sectors[a.symbol] = a.sector
+        from app.models import MarketDataSnapshot
+        for snap in db.scalars(select(MarketDataSnapshot).where(
+                MarketDataSnapshot.symbol.in_([s for s in symbols if s not in sectors]))):
+            sector = (snap.indicators or {}).get("fundamentals", {}).get("sector")
+            if sector:
+                sectors[snap.symbol] = str(sector)
     sector_weights: dict[str, float] = {}
     for p in pos:
         sec = sectors.get(p["symbol"], "Unknown")

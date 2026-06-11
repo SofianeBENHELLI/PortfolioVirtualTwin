@@ -118,10 +118,70 @@ class AlpacaPaperBroker:
         )
 
 
+class ManualExecutionBroker:
+    """For REAL (tracked) portfolios: the app manages the order lifecycle, the user
+    executes at their actual broker/bank and records the fill. submit() therefore never
+    fills — orders stay open ('pending external execution') until
+    execution.service.record_external_fill() is called with the real fill details.
+    No API call ever leaves this class."""
+
+    name = "manual"
+    _seq = 0
+
+    def submit(self, *, symbol: str, side: str, qty: float, order_type: str,
+               limit_price: float | None, market_price: float | None) -> BrokerOrderResult:
+        ManualExecutionBroker._seq += 1
+        return BrokerOrderResult(f"manual-{ManualExecutionBroker._seq}", "open",
+                                 detail="pending external execution — execute at your broker, then record the fill")
+
+    def poll(self, broker_order_id: str, market_price: float | None) -> BrokerOrderResult:
+        return BrokerOrderResult(broker_order_id, "open")
+
+    def cancel(self, broker_order_id: str) -> bool:
+        return True
+
+
+class AlpacaLiveBroker:
+    """REAL-MONEY Alpaca broker (US international account, paper=False).
+
+    SAFETY: constructible ONLY when LIVE_TRADING_ENABLED=true AND dedicated live keys
+    are configured. Not selectable from the UI yet — wired for the future activation
+    path (readiness checklist + arming + typed confirmation still apply on top)."""
+
+    name = "alpaca_live"
+
+    def __init__(self) -> None:
+        s = get_settings()
+        if not s.live_trading_enabled:
+            raise RuntimeError("Live trading is disabled (LIVE_TRADING_ENABLED is not set)")
+        if not s.alpaca_live_api_key or not s.alpaca_live_secret_key:
+            raise RuntimeError("Live Alpaca keys not configured (ALPACA_LIVE_API_KEY / ALPACA_LIVE_SECRET_KEY)")
+        from alpaca.trading.client import TradingClient
+
+        self._client = TradingClient(s.alpaca_live_api_key, s.alpaca_live_secret_key, paper=False)
+        # order methods intentionally identical to AlpacaPaperBroker via shared helpers
+        self._paper_like = AlpacaPaperBroker.__new__(AlpacaPaperBroker)
+        self._paper_like._client = self._client
+
+    def submit(self, **kwargs) -> BrokerOrderResult:
+        return AlpacaPaperBroker.submit(self._paper_like, **kwargs)
+
+    def poll(self, broker_order_id: str, market_price: float | None) -> BrokerOrderResult:
+        return AlpacaPaperBroker.poll(self._paper_like, broker_order_id, market_price)
+
+    def cancel(self, broker_order_id: str) -> bool:
+        return AlpacaPaperBroker.cancel(self._paper_like, broker_order_id)
+
+
 _sim = SimBroker()
+_manual = ManualExecutionBroker()
 
 
 def get_broker(name: str) -> BrokerProtocol:
     if name == "alpaca_paper":
         return AlpacaPaperBroker()
+    if name == "manual":
+        return _manual
+    if name == "alpaca_live":
+        return AlpacaLiveBroker()  # raises unless explicitly enabled + keys present
     return _sim

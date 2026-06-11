@@ -12,6 +12,7 @@ const NAV: { section: string; items: { href: string; label: string }[] }[] = [
     items: [
       { href: "/", label: "Portfolio" },
       { href: "/stocks", label: "My Stocks" },
+      { href: "/macro", label: "Macro & World" },
       { href: "/risk", label: "Risks" },
     ],
   },
@@ -43,6 +44,8 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [realEquity, setRealEquity] = useState<number | null>(null);
+  const [realArmed, setRealArmed] = useState(false);
+  const [killEngaged, setKillEngaged] = useState(false);
   const [alertCount, setAlertCount] = useState(0);
 
   const refresh = useCallback(async () => {
@@ -52,15 +55,34 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
       if (paper) {
         setSummary(await api<Summary>(`/api/portfolios/${paper.id}/summary`));
       }
-      const real = portfolios.find((p) => p.kind === "real_tracked");
+      const real = portfolios.find((p) => p.kind === "real_tracked") as
+        { id: number; live_armed?: boolean } | undefined;
       if (real) {
         const rs = await api<Summary>(`/api/portfolios/${real.id}/summary`);
         setRealEquity(rs.equity);
-      } else setRealEquity(null);
+        setRealArmed(!!real.live_armed);
+      } else { setRealEquity(null); setRealArmed(false); }
+      const ks = await api<{ engaged: boolean }>("/api/kill-switch");
+      setKillEngaged(ks.engaged);
       const alerts = await api<{ acknowledged: boolean }[]>("/api/alerts");
       setAlertCount(alerts.filter((a) => !a.acknowledged).length);
     } catch {}
   }, []);
+
+  async function toggleKillSwitch() {
+    const engage = !killEngaged;
+    const msg = engage
+      ? "ENGAGE KILL SWITCH?\n\nThis cancels ALL open orders (paper and real) and disarms your real portfolio."
+      : "Disengage the kill switch? Real portfolios stay disarmed until you re-arm them.";
+    if (!window.confirm(msg)) return;
+    try {
+      await api("/api/kill-switch", {
+        method: "POST",
+        body: JSON.stringify({ engage, reason: engage ? "manual (header button)" : "" }),
+      });
+      refresh();
+    } catch {}
+  }
 
   useEffect(() => {
     if (!getToken()) {
@@ -123,11 +145,25 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
           )}
           {realEquity != null && (
             <span className="flex items-center gap-1.5 text-zinc-600">
-              <Badge className="bg-emerald-600 hover:bg-emerald-600">REAL</Badge>
-              {fmtMoney(realEquity)} <span className="text-xs text-zinc-400">(tracked)</span>
+              <Badge className={realArmed ? "bg-red-600 hover:bg-red-600 animate-pulse" : "bg-emerald-600 hover:bg-emerald-600"}>
+                {realArmed ? "REAL · ARMED" : "REAL"}
+              </Badge>
+              {fmtMoney(realEquity)}
+              <span className="text-xs text-zinc-400">{realArmed ? "(orders enabled)" : "(tracked)"}</span>
             </span>
           )}
-          <span className="ml-auto text-zinc-400 text-xs">No real money. Agents propose — you approve.</span>
+          <span className="ml-auto flex items-center gap-3">
+            <span className="text-zinc-400 text-xs">Agents propose — you approve.</span>
+            {(realArmed || killEngaged) && (
+              <button onClick={toggleKillSwitch}
+                className={`rounded px-2.5 py-1 text-xs font-bold border-2 ${
+                  killEngaged
+                    ? "border-zinc-500 bg-zinc-800 text-zinc-100"
+                    : "border-red-600 bg-red-50 text-red-700 hover:bg-red-600 hover:text-white"}`}>
+                {killEngaged ? "⛔ KILLED — click to re-enable" : "⛔ KILL SWITCH"}
+              </button>
+            )}
+          </span>
         </header>
         <main className="flex-1 p-6 bg-zinc-50">{children}</main>
       </div>

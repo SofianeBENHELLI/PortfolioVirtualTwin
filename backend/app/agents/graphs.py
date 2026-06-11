@@ -185,13 +185,21 @@ def run_research(db: Session, user_id: int, twin: StrategyTwin, version_id: int 
         graph = _build_research_graph()
         out = graph.invoke({"symbols": symbols, "twin": twin.model_dump(mode="json"),
                             "data": {}, "analyses": {}, "pt": 0, "ct": 0})
+        from app.risk.scoring import score_recommendation
         n = 0
         for sym, a in out["analyses"].items():
             if "error" in a:
                 continue
+            vol = out["data"].get(sym, {}).get("indicators", {}).get("volatility_30d")
+            try:
+                rs = score_recommendation(db, user_id, twin, sym, a["action"], vol)
+                risk_score = rs.score
+            except Exception:
+                risk_score = None
             db.add(Recommendation(
                 agent_run_id=run.id, user_id=user_id, symbol=sym, action=a["action"],
-                confidence=a["confidence"], thesis=a["thesis"], invalidation=a["invalidation"],
+                confidence=a["confidence"], risk_score=risk_score,
+                thesis=a["thesis"], invalidation=a["invalidation"],
                 data_used={"inputs": out["data"].get(sym, {}),
                            "scores": {"quality_score": a["quality_score"],
                                       "valuation_risk": a["valuation_risk"]}},
@@ -205,6 +213,46 @@ def run_research(db: Session, user_id: int, twin: StrategyTwin, version_id: int 
     except Exception as exc:
         _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
     return run
+
+
+# ------------------------------------------------------------------ MacroAgent
+# Narrates the DETERMINISTIC MacroSnapshot (it never computes regime flags itself).
+
+def run_macro_brief(db: Session, user_id: int, snapshot) -> "MacroReport":
+    from app.models import MacroReport
+
+    run = AgentRun(user_id=user_id, graph="macro", inputs={"snapshot_id": snapshot.id})
+    db.add(run)
+    db.commit()
+    indicators = {k: {kk: vv for kk, vv in v.items() if kk != "sparkline"}
+                  for k, v in (snapshot.indicators or {}).items()}
+    headlines = (snapshot.war or {}).get("headlines", [])[:10]
+    prompt = (
+        "You are the MACRO agent of a paper/real portfolio app. Using ONLY the data below, write a "
+        "concise macro & geopolitical briefing (max 280 words) with sections: Regime (state each "
+        "computed flag and what drives it, citing numbers), Geopolitics (war-risk signal + what the "
+        "headlines suggest — attribute claims to headlines, don't assert them as fact), and What it "
+        "means for a stock strategy (2-3 concrete, conditional implications, e.g. hedging, sizing, "
+        "sectors). No investment advice disclaimer needed; never invent data.\n\n"
+        f"Computed regime flags (deterministic): { {k: v for k, v in (snapshot.regimes or {}).items() if k != 'thresholds'} }\n"
+        f"Indicators: {indicators}\n"
+        f"FRED: {snapshot.fred}\nGPR index: {snapshot.gpr}\n"
+        f"War coverage signal: { {k: v for k, v in (snapshot.war or {}).items() if k != 'headlines'} }\n"
+        f"Recent headlines: {[h['title'] + ' (' + h['source'] + ')' for h in headlines]}"
+    )
+    try:
+        msg = get_chat_model(temperature=0.3).invoke(prompt)
+        pt, ct = usage_from(msg)
+        narrative = msg.content if isinstance(msg.content, str) else str(msg.content)
+        report = MacroReport(user_id=user_id, snapshot_id=snapshot.id, narrative=narrative)
+        db.add(report)
+        _finish_run(db, run, "Macro briefing generated", pt, ct)
+        audit(db, "agent.macro_done", user_id=user_id, actor="agent", entity="macro_report")
+        db.commit()
+        return report
+    except Exception as exc:
+        _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
+        raise
 
 
 # ---------------------------------------------------------------- Bull/Bear duo
@@ -258,10 +306,16 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                     case = result["parsed"]
                     if case is None:
                         continue
+                    from app.risk.scoring import score_recommendation
+                    vol = payload.get("indicators", {}).get("volatility_30d")
+                    try:
+                        risk_score = score_recommendation(db, user_id, twin, sym, action, vol).score
+                    except Exception:
+                        risk_score = None
                     db.add(Recommendation(
                         agent_run_id=run.id, user_id=user_id, symbol=sym, action=action,
-                        confidence=case.signal_strength / 100.0, thesis=case.thesis,
-                        invalidation=case.invalidation,
+                        confidence=case.signal_strength / 100.0, risk_score=risk_score,
+                        thesis=case.thesis, invalidation=case.invalidation,
                         data_used={"perspective": perspective, "key_points": case.key_points,
                                    "signal_strength": case.signal_strength},
                     ))

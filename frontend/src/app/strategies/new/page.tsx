@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
+import { RiskSlider } from "@/components/risk-widgets";
 
 type Rule = { metric: string; op: string; value: number | boolean | string };
 
@@ -229,22 +230,28 @@ export default function StrategyWizard() {
           )}
 
           {step === 4 && (
-            <div className="grid md:grid-cols-3 gap-4">
-              {([
-                ["max_position_weight_pct", "Max position weight (%)"],
-                ["max_sector_weight_pct", "Max sector weight (%)"],
-                ["max_portfolio_drawdown_pct", "Max portfolio drawdown (%)"],
-                ["max_daily_loss_pct", "Max daily loss (%)"],
-                ["max_number_of_positions", "Max number of positions"],
-                ["max_orders_per_day", "Max orders per day"],
-              ] as [keyof typeof risk, string][]).map(([k, label]) => (
-                <label key={k} className="text-sm">{label}
-                  <Input type="number" step="any" value={String(risk[k])} className="mt-1"
-                    onChange={(e) => setRisk({ ...risk, [k]: parseFloat(e.target.value) || 0 })} /></label>
-              ))}
-              <p className="md:col-span-3 text-xs text-zinc-500">
+            <div className="grid md:grid-cols-2 gap-x-8 gap-y-5">
+              <RiskSlider label="Max position weight" value={risk.max_position_weight_pct}
+                onChange={(v) => setRisk({ ...risk, max_position_weight_pct: v })}
+                min={1} max={25} hint="single-stock concentration" />
+              <RiskSlider label="Max sector weight" value={risk.max_sector_weight_pct}
+                onChange={(v) => setRisk({ ...risk, max_sector_weight_pct: v })}
+                min={10} max={100} step={5} hint="sector concentration" />
+              <RiskSlider label="Max portfolio drawdown" value={risk.max_portfolio_drawdown_pct}
+                onChange={(v) => setRisk({ ...risk, max_portfolio_drawdown_pct: v })}
+                min={5} max={40} hint="buys blocked beyond this" />
+              <RiskSlider label="Max daily loss" value={risk.max_daily_loss_pct}
+                onChange={(v) => setRisk({ ...risk, max_daily_loss_pct: v })}
+                min={1} max={10} step={0.5} hint="circuit breaker" />
+              <RiskSlider label="Max number of positions" value={risk.max_number_of_positions}
+                onChange={(v) => setRisk({ ...risk, max_number_of_positions: v })}
+                min={1} max={50} unit="" hint="diversification" />
+              <RiskSlider label="Max orders per day" value={risk.max_orders_per_day}
+                onChange={(v) => setRisk({ ...risk, max_orders_per_day: v })}
+                min={1} max={50} unit="" hint="overtrading guard" />
+              <p className="md:col-span-2 text-xs text-zinc-500">
                 These are hard limits — the deterministic risk gateway blocks any order that would breach them,
-                and the monitor raises alerts as you approach them.
+                and the monitor raises alerts as you approach them. Green = conservative, red = aggressive.
               </p>
             </div>
           )}

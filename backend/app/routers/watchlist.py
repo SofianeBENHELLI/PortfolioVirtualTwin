@@ -119,6 +119,7 @@ def refresh_data(user: User = Depends(get_current_user), db: Session = Depends(g
     symbols = [w.symbol for w in watched]
     data = gather_symbol_data(symbols, "SPY")
     now = datetime.now(timezone.utc)
+    from app.models import Asset
     for sym, entry in data.items():
         snap = db.scalar(select(MarketDataSnapshot).where(MarketDataSnapshot.symbol == sym))
         indicators = {**entry["indicators"], "fundamentals": entry["fundamentals"]}
@@ -128,6 +129,15 @@ def refresh_data(user: User = Depends(get_current_user), db: Session = Depends(g
             snap.price = entry["price"]
             snap.indicators = indicators
             snap.as_of = now
+        # keep the Asset registry (sector data for the risk gateway) up to date
+        sector = entry["fundamentals"].get("sector")
+        if sector:
+            asset = db.scalar(select(Asset).where(Asset.symbol == sym))
+            if asset is None:
+                db.add(Asset(symbol=sym, name=str(entry["fundamentals"].get("longName", "")),
+                             sector=str(sector)))
+            else:
+                asset.sector = str(sector)
     audit(db, "watchlist.data_refreshed", user_id=user.id,
           payload={"symbols": symbols, "fetched": list(data.keys())})
     db.commit()

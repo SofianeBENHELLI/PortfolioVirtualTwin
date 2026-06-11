@@ -116,6 +116,7 @@ class Recommendation(Base):
     symbol: Mapped[str] = mapped_column(String(20), index=True)
     action: Mapped[str] = mapped_column(String(10))  # buy | sell | hold | hedge
     confidence: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-100, deterministic
     thesis: Mapped[str] = mapped_column(Text, default="")
     invalidation: Mapped[str] = mapped_column(Text, default="")  # what would break the thesis
     data_used: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -147,8 +148,12 @@ class Portfolio(Base):
     # real_tracked: mirror of an actual brokerage account — holdings entered manually,
     # valued live, NEVER tradeable from this app.
     kind: Mapped[str] = mapped_column(String(12), default="paper")  # paper | real_tracked
-    broker: Mapped[str] = mapped_column(String(20), default="sim")  # sim | alpaca_paper | none
-    mode: Mapped[str] = mapped_column(String(10), default="paper")  # paper only in MVP 1
+    broker: Mapped[str] = mapped_column(String(20), default="sim")  # sim | alpaca_paper | manual
+    mode: Mapped[str] = mapped_column(String(10), default="paper")
+    # real-portfolio guardrails: orders only when armed; hard caps enforced by the gateway
+    live_armed: Mapped[bool] = mapped_column(Boolean, default=False)
+    max_order_notional: Mapped[float] = mapped_column(Float, default=1_000.0)
+    max_live_orders_per_day: Mapped[int] = mapped_column(Integer, default=5)
     initial_cash: Mapped[float] = mapped_column(Float, default=100_000.0)
     cash: Mapped[float] = mapped_column(Float, default=100_000.0)
     strategy_id: Mapped[int | None] = mapped_column(ForeignKey("strategies.id"), nullable=True)
@@ -193,6 +198,8 @@ class OrderProposal(Base):
     order_type: Mapped[str] = mapped_column(String(10), default="market")  # market | limit
     limit_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     rationale: Mapped[str] = mapped_column(Text, default="")  # why (signal, rule)
+    risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-100, deterministic
+    risk_factors: Mapped[dict] = mapped_column(JSON, default=dict)  # explainable factor breakdown
     source: Mapped[str] = mapped_column(String(20), default="manual")  # manual | agent
     status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
     risk_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
@@ -280,6 +287,37 @@ class PerformanceReport(Base):
     narrative: Mapped[str] = mapped_column(Text, default="")  # "the portfolio gained because..."
     stats: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class MacroSnapshot(Base):
+    """One row per macro refresh: indicators + war signal + deterministic regime flags."""
+    __tablename__ = "macro_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    indicators: Mapped[dict] = mapped_column(JSON, default=dict)
+    fred: Mapped[dict] = mapped_column(JSON, default=dict)
+    war: Mapped[dict] = mapped_column(JSON, default=dict)
+    gpr: Mapped[dict] = mapped_column(JSON, default=dict)
+    regimes: Mapped[dict] = mapped_column(JSON, default=dict)
+    as_of: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
+class MacroReport(Base):
+    """LLM macro agent briefing (narration of a MacroSnapshot — never computes flags)."""
+    __tablename__ = "macro_reports"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    snapshot_id: Mapped[int] = mapped_column(ForeignKey("macro_snapshots.id"))
+    narrative: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+
+
+class SystemState(Base):
+    """Single-row system flags (kill switch)."""
+    __tablename__ = "system_state"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    kill_switch_engaged: Mapped[bool] = mapped_column(Boolean, default=False)
+    kill_switch_reason: Mapped[str] = mapped_column(String(255), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
 
 
 class AuditLog(Base):
