@@ -44,6 +44,44 @@ def login(creds: Credentials, db: Session = Depends(get_db)):
     return {"token": create_token(user.id), "user_id": user.id, "email": user.email}
 
 
+class OpenAIKeyUpdate(BaseModel):
+    api_key: str  # empty string clears the key
+
+
+def _key_status(user: User, db: Session) -> dict:
+    from app.agents.llm import resolve_openai_key
+    from app.core.crypto import decrypt_secret
+
+    personal = decrypt_secret(user.openai_api_key_enc) if user.openai_api_key_enc else None
+    key, source = resolve_openai_key(db, user.id)
+    return {
+        "has_personal_key": bool(personal),
+        "personal_key_hint": f"…{personal[-4:]}" if personal else None,
+        "llm_available": bool(key),
+        "key_source": source,  # personal | shared | ''
+    }
+
+
 @router.get("/me")
-def me(user: User = Depends(get_current_user)):
-    return {"user_id": user.id, "email": user.email}
+def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    return {"user_id": user.id, "email": user.email, **_key_status(user, db)}
+
+
+@router.put("/me/openai-key")
+def set_openai_key(payload: OpenAIKeyUpdate, user: User = Depends(get_current_user),
+                   db: Session = Depends(get_db)):
+    """Store (or clear, with empty string) the user's personal OpenAI key — encrypted at
+    rest. Agents triggered by this user run and bill on this key."""
+    from app.core.crypto import encrypt_secret
+
+    key = payload.api_key.strip()
+    if key:
+        if len(key) < 20 or " " in key:
+            raise HTTPException(422, "That doesn't look like an OpenAI API key")
+        user.openai_api_key_enc = encrypt_secret(key)
+        audit(db, "user.openai_key_set", user_id=user.id, payload={"hint": f"…{key[-4:]}"})
+    else:
+        user.openai_api_key_enc = ""
+        audit(db, "user.openai_key_cleared", user_id=user.id)
+    db.commit()
+    return _key_status(user, db)

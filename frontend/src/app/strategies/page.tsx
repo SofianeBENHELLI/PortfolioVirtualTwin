@@ -114,7 +114,7 @@ export default function StrategiesPage() {
             <TabsContent value="ai" className="space-y-3">
               {!llm && (
                 <p className="text-sm text-amber-700 bg-amber-50 rounded p-2">
-                  AI builder needs OPENAI_API_KEY on the backend. You can still use the YAML editor.
+                  The AI builder needs your OpenAI key — add it in Settings. You can still use the wizard or YAML editor.
                 </p>
               )}
               <Textarea rows={4} value={description} onChange={(e) => setDescription(e.target.value)}

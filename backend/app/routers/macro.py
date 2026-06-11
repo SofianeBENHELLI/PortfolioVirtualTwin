@@ -74,7 +74,7 @@ def refresh(db: Session = Depends(get_db), user: User = Depends(get_current_user
 
 @router.post("/brief")
 def brief(db: Session = Depends(get_db), user: User = Depends(get_current_user)):
-    require_llm()
+    require_llm(db, user.id)
     snap = latest_snapshot(db)
     if snap is None:
         raise HTTPException(409, "No macro snapshot yet — refresh macro data first")

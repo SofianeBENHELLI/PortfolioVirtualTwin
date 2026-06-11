@@ -216,7 +216,7 @@ export default function MacroPage() {
                   </>
                 ) : (
                   <p className="text-sm text-zinc-400">
-                    {llm ? "No briefing yet — run the macro agent." : "Requires OPENAI_API_KEY on the backend."}
+                    {llm ? "No briefing yet — run the macro agent." : "Requires your OpenAI key — add it in Settings."}
                   </p>
                 )}
               </CardContent>

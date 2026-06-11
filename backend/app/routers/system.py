@@ -6,7 +6,6 @@ from sse_starlette.sse import EventSourceResponse
 
 from pydantic import BaseModel
 
-from app.agents.llm import llm_available
 from app.audit.service import audit
 from app.core.config import get_settings
 from app.core.db import get_db
@@ -35,7 +34,8 @@ def get_system_state(db: Session) -> SystemState:
 @router.get("/health")
 def health():
     s = get_settings()
-    return {"status": "ok", "mode": s.trading_mode, "llm_available": llm_available(),
+    return {"status": "ok", "mode": s.trading_mode,
+            "shared_llm_configured": bool(s.openai_api_key),
             "alpaca_configured": bool(s.alpaca_api_key),
             "live_trading_enabled": s.live_trading_enabled}
 

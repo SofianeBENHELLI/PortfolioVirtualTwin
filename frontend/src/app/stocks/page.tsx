@@ -150,7 +150,7 @@ export default function MyStocks() {
 
       {!llm && (
         <p className="text-sm text-amber-700 bg-amber-50 rounded p-2">
-          Bull &amp; Bear agents need OPENAI_API_KEY on the backend — data tracking works without it.
+          Bull &amp; Bear agents need your OpenAI key — add it in Settings. Data tracking works without it.
         </p>
       )}
       {info && <p className="text-sm text-blue-700">{info}</p>}

@@ -148,7 +148,7 @@ def refresh_data(user: User = Depends(get_current_user), db: Session = Depends(g
 @router.post("/bullbear")
 def bull_bear(payload: BullBearRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     """Run the Bull and Bear agents on tracked stocks (or an explicit subset)."""
-    require_llm()
+    require_llm(db, user.id)
     version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
     symbols = [s.upper() for s in payload.symbols]
     if not symbols:

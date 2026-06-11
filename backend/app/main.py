@@ -30,6 +30,7 @@ def _micro_migrations() -> None:
         ],
         "order_proposals": [("risk_score", "FLOAT"), ("risk_factors", "JSON")],
         "recommendations": [("risk_score", "FLOAT")],
+        "users": [("openai_api_key_enc", "TEXT DEFAULT ''")],
     }
     tables = set(inspector.get_table_names())
     with engine.begin() as conn:

@@ -37,13 +37,15 @@ class ExplainRequest(BaseModel):
 
 
 @router.get("/status")
-def status():
-    return {"llm_available": llm_available()}
+def status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    from app.agents.llm import resolve_openai_key
+    key, source = resolve_openai_key(db, user.id)
+    return {"llm_available": bool(key), "key_source": source}
 
 
 @router.post("/capture")
 def capture(payload: CaptureRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    require_llm()
+    require_llm(db, user.id)
     try:
         twin, run = graphs.capture_strategy(db, user.id, payload.description, payload.current_twin)
     except ValueError as exc:
@@ -53,7 +55,7 @@ def capture(payload: CaptureRequest, user: User = Depends(get_current_user), db:
 
 @router.post("/research")
 def research(payload: ResearchRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    require_llm()
+    require_llm(db, user.id)
     version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
     symbols = payload.symbols or twin.universe.symbols
     if not symbols:
@@ -78,7 +80,7 @@ def proposals(payload: ProposalRequest, user: User = Depends(get_current_user), 
 
 @router.post("/explain")
 def explain(payload: ExplainRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
-    require_llm()
+    require_llm(db, user.id)
     portfolio = exec_service.get_portfolio(db, user.id, payload.portfolio_id)
     try:
         report = graphs.run_explain(db, user.id, portfolio)

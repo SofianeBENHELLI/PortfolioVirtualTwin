@@ -50,7 +50,8 @@ def capture_strategy(db: Session, user_id: int, description: str,
     db.add(run)
     db.commit()
 
-    model = get_chat_model(temperature=0.1)
+    from app.agents.llm import require_llm
+    model = get_chat_model(require_llm(db, user_id), temperature=0.1)
     structured = model.with_structured_output(StrategyTwin, include_raw=True)
     prompt = CAPTURE_SYSTEM + "\n\nUser strategy description:\n" + description
     if current:
@@ -94,6 +95,7 @@ class TickerAnalysis(BaseModel):
 class ResearchState(TypedDict):
     symbols: list[str]
     twin: dict
+    api_key: str
     data: dict
     analyses: dict
     pt: int
@@ -138,7 +140,7 @@ def _gather_node(state: ResearchState) -> dict:
 
 
 def _analyze_node(state: ResearchState) -> dict:
-    model = get_chat_model().with_structured_output(TickerAnalysis, include_raw=True)
+    model = get_chat_model(state["api_key"]).with_structured_output(TickerAnalysis, include_raw=True)
     twin = StrategyTwin.model_validate(state["twin"])
     analyses: dict = {}
     pt = ct = 0
@@ -183,7 +185,9 @@ def run_research(db: Session, user_id: int, twin: StrategyTwin, version_id: int 
     db.commit()
     try:
         graph = _build_research_graph()
+        from app.agents.llm import require_llm
         out = graph.invoke({"symbols": symbols, "twin": twin.model_dump(mode="json"),
+                            "api_key": require_llm(db, user_id),
                             "data": {}, "analyses": {}, "pt": 0, "ct": 0})
         from app.risk.scoring import score_recommendation
         n = 0
@@ -241,7 +245,8 @@ def run_macro_brief(db: Session, user_id: int, snapshot) -> "MacroReport":
         f"Recent headlines: {[h['title'] + ' (' + h['source'] + ')' for h in headlines]}"
     )
     try:
-        msg = get_chat_model(temperature=0.3).invoke(prompt)
+        from app.agents.llm import require_llm
+        msg = get_chat_model(require_llm(db, user_id), temperature=0.3).invoke(prompt)
         pt, ct = usage_from(msg)
         narrative = msg.content if isinstance(msg.content, str) else str(msg.content)
         report = MacroReport(user_id=user_id, snapshot_id=snapshot.id, narrative=narrative)
@@ -291,7 +296,8 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
     db.commit()
     try:
         data = gather_symbol_data(symbols, twin.benchmark)
-        model = get_chat_model(temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
+        from app.agents.llm import require_llm
+        model = get_chat_model(require_llm(db, user_id), temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
         pt = ct = n = 0
         for sym, payload in data.items():
             for perspective, prompt_tpl, action in (("bull", BULL_PROMPT, "buy"), ("bear", BEAR_PROMPT, "sell")):
@@ -410,7 +416,8 @@ def run_explain(db: Session, user_id: int, portfolio: Portfolio, kind: str = "on
         f"Recent alerts: {[{'level': a.level, 'title': a.title} for a in alerts]}"
     )
     try:
-        msg = get_chat_model(temperature=0.3).invoke(prompt)
+        from app.agents.llm import require_llm
+        msg = get_chat_model(require_llm(db, user_id), temperature=0.3).invoke(prompt)
         pt, ct = usage_from(msg)
         narrative = msg.content if isinstance(msg.content, str) else str(msg.content)
         report = PerformanceReport(user_id=user_id, portfolio_id=portfolio.id, kind=kind,

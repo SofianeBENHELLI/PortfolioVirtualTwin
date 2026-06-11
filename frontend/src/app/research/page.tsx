@@ -81,7 +81,7 @@ export default function ResearchDesk() {
       <h1 className="text-2xl font-bold">Agent Research Desk</h1>
       {!llm && (
         <p className="text-sm text-amber-700 bg-amber-50 rounded p-3">
-          Agents are disabled: set OPENAI_API_KEY in backend/.env. Everything else keeps working.
+          Agents are disabled: add your OpenAI key in Settings (each user brings their own). Everything else keeps working.
         </p>
       )}
 
