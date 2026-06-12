@@ -65,8 +65,10 @@ def load_prompt(name: str) -> str:
 
 
 def render(template: str, **kwargs) -> str:
-    """format_map that leaves unknown {tokens} intact instead of crashing."""
-    class _Safe(dict):
-        def __missing__(self, key):  # noqa: D105
-            return "{" + key + "}"
-    return template.format_map(_Safe(**kwargs))
+    """Replace {key} tokens by simple substitution. Unlike str.format, this never
+    chokes on stray braces in rich Markdown prompts (tables, code blocks, {TICKER}
+    examples) and leaves unknown tokens intact."""
+    out = template
+    for key, value in kwargs.items():
+        out = out.replace("{" + key + "}", str(value))
+    return out

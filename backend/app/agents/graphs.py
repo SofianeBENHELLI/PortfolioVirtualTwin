@@ -273,20 +273,64 @@ def run_macro_brief(db: Session, user_id: int, snapshot) -> "MacroReport":
 # All outputs are stored as Recommendations (perspective in data_used) — signals for
 # the human, never orders.
 
+class PillarScores(BaseModel):
+    fundamental: float = Field(ge=0, le=10, description="Pillar A score /10")
+    technical: float = Field(ge=0, le=10, description="Pillar B score /10")
+    industry: float = Field(ge=0, le=10, description="Pillar C score /10")
+    sector_macro: float = Field(ge=0, le=10, description="Pillar D score /10")
+    composite: float = Field(ge=0, le=10, description="weighted composite (40/20/20/20)")
+
+
 class AdversarialCase(BaseModel):
-    signal_strength: float = Field(ge=0, le=100, description="0 = no case at all, 100 = extremely strong case")
-    thesis: str = Field(description="2-3 sentences, grounded in the provided data with cited numbers")
-    key_points: list[str] = Field(description="3-5 bullet points, each citing a number from the data")
-    invalidation: str = Field(description="what observable change would kill this case")
+    """Structured capture of the Bull/Bear brief (per the prompt's Output Format)."""
+    rating: str = Field(description="Bull: STRONG BUY|BUY|ACCUMULATE|NO ACTIONABLE BULL CASE. "
+                                    "Bear: STRONG SELL|SELL|AVOID|SHORT|NO ACTIONABLE BEAR CASE")
+    conviction: float = Field(ge=0, le=10, description="conviction X/10")
+    thesis: str = Field(description="the thesis in 3 sentences, citing numbers with [FACT]/[EST] tags")
+    pillar_scores: PillarScores
+    pillar_notes: list[str] = Field(description="one line per pillar: Fundamental/Technical/Industry/Sector-Macro justification")
+    target_price_12m: str = Field(description="bear / base / bull 12m range with implied % and key assumption")
+    catalysts: list[str] = Field(description="3-7 dated catalysts: 'catalyst — window — probability [EST] — expected impact'")
+    steelman_rebuttals: list[str] = Field(description="the 3 strongest opposing arguments and your rebuttal/concession for each")
+    risks: list[str] = Field(description="honestly acknowledged risks to THIS case, with severity")
+    invalidation: str = Field(description="price level or event that kills this thesis")
+    data_gaps: str = Field(description="data that was missing and how it affects conviction")
+
+
+class ScorecardRow(BaseModel):
+    pillar: str = Field(description="Fundamental (40%) | Technical (20%) | Industry (20%) | Sector/Macro (20%)")
+    bull_score: float = Field(ge=0, le=10)
+    bear_score: float = Field(ge=0, le=10)
+    edge: str = Field(description="BULL | BEAR | TIE")
+    why: str = Field(description="one line")
 
 
 class JudgeVerdict(BaseModel):
-    action: str = Field(description="buy | sell | hold")
-    conviction: float = Field(ge=0, le=100, description="how decisive the evidence is; 50 = balanced")
-    rationale: str = Field(description="3-4 sentences: which side wins and the decisive numbers")
-    strongest_bull_point: str = Field(description="the single most valid bull argument")
-    strongest_bear_point: str = Field(description="the single most valid bear argument")
-    invalidation: str = Field(description="what observable change would flip this verdict")
+    """Structured arbitration per the Judge prompt's rubric and decision logic."""
+    action: str = Field(description="BUY | ACCUMULATE | HOLD | REDUCE | SELL | INSUFFICIENT EVIDENCE")
+    conviction: float = Field(ge=0, le=10, description="winner's composite adjusted for omissions/data gaps, X/10")
+    verdict_summary: str = Field(description="5 sentences: who won, on what, by how much, what would change the answer")
+    scorecard: list[ScorecardRow] = Field(description="evidence-quality scores per pillar + weighted composite row")
+    bull_composite: float = Field(ge=0, le=10)
+    bear_composite: float = Field(ge=0, le=10)
+    horizon: str = Field(description="which horizon the edge applies to (0-6m trade vs 6-18m position)")
+    sizing_guidance: str = Field(description="relative band only: e.g. 'half-size starter', 'no position'")
+    catalyst_skew_0_6m: str = Field(description="POSITIVE | NEGATIVE | BALANCED + dominant events")
+    catalyst_skew_6_18m: str = Field(description="POSITIVE | NEGATIVE | BALANCED + dominant events")
+    strongest_bull: list[str] = Field(description="top 3 surviving bull arguments")
+    strongest_bear: list[str] = Field(description="top 3 surviving bear arguments")
+    material_omissions: list[str] = Field(description="things BOTH agents missed (flag only); empty if none")
+    invalidation_triggers: list[str] = Field(description="2-3 concrete events/levels that force a re-run")
+    reevaluation_date: str = Field(description="next catalyst or max 90 days")
+
+
+def _judge_to_action(action: str) -> str:
+    a = action.strip().upper()
+    if a in ("BUY", "ACCUMULATE", "STRONG BUY"):
+        return "buy"
+    if a in ("SELL", "REDUCE", "STRONG SELL", "SHORT"):
+        return "sell"
+    return "hold"
 
 
 def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int | None,
@@ -307,6 +351,8 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
         prompts = {name: load_prompt(name) for name in ("Bull", "Bear", "Judge")}
         style, horizon = twin.investment_thesis.style, twin.investment_thesis.horizon
 
+        from datetime import date
+        as_of = date.today().isoformat()
         pt = ct = n = judged = 0
         last_error = ""
         for sym, payload in data.items():
@@ -315,7 +361,8 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
             for perspective, action in (("bull", "buy"), ("bear", "sell")):
                 try:
                     prompt = render(prompts[perspective.capitalize()],
-                                    sym=sym, data=payload, style=style, horizon=horizon)
+                                    sym=sym, data=payload, style=style, horizon=horizon,
+                                    as_of_date=as_of)
                     result = model.invoke(prompt)
                     raw = result.get("raw")
                     if raw is not None:
@@ -332,10 +379,13 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                         risk_score = None
                     db.add(Recommendation(
                         agent_run_id=run.id, user_id=user_id, symbol=sym, action=action,
-                        confidence=case.signal_strength / 100.0, risk_score=risk_score,
+                        confidence=case.conviction / 10.0, risk_score=risk_score,
                         thesis=case.thesis, invalidation=case.invalidation,
-                        data_used={"perspective": perspective, "key_points": case.key_points,
-                                   "signal_strength": case.signal_strength},
+                        data_used={"perspective": perspective,
+                                   "signal_strength": case.conviction * 10,
+                                   "rating": case.rating,
+                                   "key_points": case.pillar_notes,
+                                   "report": case.model_dump()},
                     ))
                     n += 1
                 except Exception as exc:
@@ -346,12 +396,28 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
             if "bull" in cases and "bear" in cases:
                 try:
                     bull, bear = cases["bull"], cases["bear"]
+
+                    def _brief(case: AdversarialCase) -> str:
+                        return (f"Thesis: {case.thesis}\n"
+                                f"Target 12m: {case.target_price_12m}\n"
+                                f"Catalysts: {'; '.join(case.catalysts)}\n"
+                                f"Steelman & rebuttals: {'; '.join(case.steelman_rebuttals)}\n"
+                                f"Acknowledged risks: {'; '.join(case.risks)}\n"
+                                f"Invalidation: {case.invalidation}\n"
+                                f"Data gaps: {case.data_gaps}")
+
+                    def _pillars(case: AdversarialCase) -> str:
+                        ps = case.pillar_scores
+                        return (f"Fundamental {ps.fundamental}/10, Technical {ps.technical}/10, "
+                                f"Industry {ps.industry}/10, Sector/Macro {ps.sector_macro}/10, "
+                                f"Composite {ps.composite}/10. Notes: {'; '.join(case.pillar_notes)}")
+
                     prompt = render(prompts["Judge"], sym=sym, data=payload, style=style,
-                                    horizon=horizon,
-                                    bull_strength=f"{bull.signal_strength:.0f}", bull_case=bull.thesis,
-                                    bull_points="; ".join(bull.key_points),
-                                    bear_strength=f"{bear.signal_strength:.0f}", bear_case=bear.thesis,
-                                    bear_points="; ".join(bear.key_points))
+                                    horizon=horizon, as_of_date=as_of,
+                                    bull_rating=bull.rating, bull_strength=f"{bull.conviction:.1f}",
+                                    bull_case=_brief(bull), bull_points=_pillars(bull),
+                                    bear_rating=bear.rating, bear_strength=f"{bear.conviction:.1f}",
+                                    bear_case=_brief(bear), bear_points=_pillars(bear))
                     result = judge_model.invoke(prompt)
                     raw = result.get("raw")
                     if raw is not None:
@@ -359,7 +425,7 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                         pt, ct = pt + p, ct + c
                     verdict = result["parsed"]
                     if verdict is not None:
-                        action = verdict.action if verdict.action in ("buy", "sell", "hold") else "hold"
+                        action = _judge_to_action(verdict.action)
                         from app.risk.scoring import score_recommendation
                         try:
                             risk_score = score_recommendation(db, user_id, twin, sym, action, vol).score
@@ -367,12 +433,14 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                             risk_score = None
                         db.add(Recommendation(
                             agent_run_id=run.id, user_id=user_id, symbol=sym, action=action,
-                            confidence=verdict.conviction / 100.0, risk_score=risk_score,
-                            thesis=verdict.rationale, invalidation=verdict.invalidation,
-                            data_used={"perspective": "judge", "signal_strength": verdict.conviction,
-                                       "action": action,
-                                       "key_points": [f"Bull's best: {verdict.strongest_bull_point}",
-                                                      f"Bear's best: {verdict.strongest_bear_point}"]},
+                            confidence=verdict.conviction / 10.0, risk_score=risk_score,
+                            thesis=verdict.verdict_summary,
+                            invalidation="; ".join(verdict.invalidation_triggers),
+                            data_used={"perspective": "judge",
+                                       "signal_strength": verdict.conviction * 10,
+                                       "action": action, "verdict_action": verdict.action,
+                                       "key_points": verdict.strongest_bull[:1] + verdict.strongest_bear[:1],
+                                       "report": verdict.model_dump()},
                         ))
                         judged += 1
                 except Exception as exc:

@@ -46,9 +46,11 @@ def _latest_signals(db: Session, user_id: int, symbols: list[str]) -> dict[str, 
         out[r.symbol][perspective] = {
             "signal_strength": (r.data_used or {}).get("signal_strength", r.confidence * 100),
             "action": r.action,
+            "rating": (r.data_used or {}).get("rating") or (r.data_used or {}).get("verdict_action"),
             "thesis": r.thesis,
             "key_points": (r.data_used or {}).get("key_points", []),
             "invalidation": r.invalidation,
+            "report": (r.data_used or {}).get("report"),
             "created_at": r.created_at.isoformat(),
         }
     return out
