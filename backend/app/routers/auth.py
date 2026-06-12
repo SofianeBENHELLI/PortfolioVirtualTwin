@@ -67,6 +67,14 @@ def me(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     return {"user_id": user.id, "email": user.email, **_key_status(user, db)}
 
 
+@router.post("/logout")
+def logout(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    """JWTs are stateless — the client discards the token; this records the event."""
+    audit(db, "user.logout", user_id=user.id)
+    db.commit()
+    return {"ok": True}
+
+
 @router.put("/me/openai-key")
 def set_openai_key(payload: OpenAIKeyUpdate, user: User = Depends(get_current_user),
                    db: Session = Depends(get_db)):

@@ -44,13 +44,22 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const [authed, setAuthed] = useState<boolean | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
+  const [userEmail, setUserEmail] = useState<string | null>(null);
   const [realEquity, setRealEquity] = useState<number | null>(null);
   const [realArmed, setRealArmed] = useState(false);
   const [killEngaged, setKillEngaged] = useState(false);
   const [alertCount, setAlertCount] = useState(0);
 
+  async function logout() {
+    try { await api("/api/auth/logout", { method: "POST" }); } catch {}  // audit only
+    setToken(null);
+    router.push("/login");
+  }
+
   const refresh = useCallback(async () => {
     try {
+      const me = await api<{ email: string }>("/api/auth/me");
+      setUserEmail(me.email);
       const portfolios = await api<{ id: number; kind: string }[]>("/api/portfolios");
       const paper = portfolios.find((p) => p.kind === "paper");
       if (paper) {
@@ -126,10 +135,20 @@ export default function AppShell({ children }: { children: React.ReactNode }) {
             </div>
           ))}
         </nav>
-        <button onClick={() => { setToken(null); router.push("/login"); }}
-          className="px-4 py-3 text-left text-sm text-zinc-400 hover:text-zinc-100 border-t border-zinc-800">
-          Sign out
-        </button>
+        <div className="border-t border-zinc-800 px-4 py-3">
+          <div className="flex items-center gap-2">
+            <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-zinc-700 text-xs font-bold uppercase">
+              {userEmail ? userEmail[0] : "?"}
+            </span>
+            <span className="min-w-0 flex-1 truncate text-xs text-zinc-400" title={userEmail ?? ""}>
+              {userEmail ?? "…"}
+            </span>
+            <button onClick={logout} title="Log out"
+              className="rounded border border-zinc-700 px-2 py-1 text-xs text-zinc-300 hover:bg-red-900/40 hover:border-red-700 hover:text-white">
+              ⎋ Logout
+            </button>
+          </div>
+        </div>
       </aside>
       <div className="flex-1 flex flex-col min-w-0">
         <header className="flex items-center gap-4 border-b bg-amber-50 px-6 py-2 text-sm">
