@@ -265,10 +265,12 @@ def run_macro_brief(db: Session, user_id: int, snapshot) -> "MacroReport":
         raise
 
 
-# ---------------------------------------------------------------- Bull/Bear duo
-# Two adversarial agents per stock: the Bull builds the strongest data-grounded BUY
-# case, the Bear the strongest SELL/avoid case. Both are stored as Recommendations
-# (perspective in data_used) — like everything agents produce, they are signals for
+# --------------------------------------------------- Bull / Bear / Judge debate
+# Three agents per stock: the Bull builds the strongest data-grounded BUY case, the
+# Bear the strongest SELL/avoid case, then the JUDGE weighs both arguments against
+# the data and issues a consolidated recommendation. Prompts are user-editable
+# Markdown files in backend/prompts/ (Bull.md, Bear.md, Judge.md), re-read each run.
+# All outputs are stored as Recommendations (perspective in data_used) — signals for
 # the human, never orders.
 
 class AdversarialCase(BaseModel):
@@ -278,23 +280,20 @@ class AdversarialCase(BaseModel):
     invalidation: str = Field(description="what observable change would kill this case")
 
 
-BULL_PROMPT = """You are the BULL agent — a disciplined long-side analyst. Build the STRONGEST
-honest case to BUY {sym} right now, using ONLY the data below. Cite exact numbers. If the data
-is genuinely weak, say so with a low signal_strength — never invent strength.
-Strategy context: style={style}, horizon={horizon}.
-Data: {data}"""
-
-BEAR_PROMPT = """You are the BEAR agent — a skeptical short-side analyst. Build the STRONGEST
-honest case to SELL / avoid {sym} right now, using ONLY the data below. Cite exact numbers.
-Hunt for stretched valuation, deteriorating fundamentals, broken momentum, crowding. If the
-data is genuinely solid, admit it with a low signal_strength — never invent weakness.
-Strategy context: style={style}, horizon={horizon}.
-Data: {data}"""
+class JudgeVerdict(BaseModel):
+    action: str = Field(description="buy | sell | hold")
+    conviction: float = Field(ge=0, le=100, description="how decisive the evidence is; 50 = balanced")
+    rationale: str = Field(description="3-4 sentences: which side wins and the decisive numbers")
+    strongest_bull_point: str = Field(description="the single most valid bull argument")
+    strongest_bear_point: str = Field(description="the single most valid bear argument")
+    invalidation: str = Field(description="what observable change would flip this verdict")
 
 
 def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int | None,
                   symbols: list[str]) -> AgentRun:
-    symbols = [s.upper() for s in symbols][:8]  # 2 LLM calls per symbol — keep runs cheap
+    from app.agents.prompts import load_prompt, render
+
+    symbols = [s.upper() for s in symbols][:8]  # 3 LLM calls per symbol — keep runs cheap
     run = AgentRun(user_id=user_id, graph="bullbear", strategy_version_id=version_id,
                    inputs={"symbols": symbols})
     db.add(run)
@@ -302,15 +301,22 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
     try:
         data = gather_symbol_data(symbols, twin.benchmark)
         from app.agents.llm import require_llm
-        model = get_chat_model(require_llm(db, user_id), temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
-        pt = ct = n = 0
+        api_key = require_llm(db, user_id)
+        model = get_chat_model(api_key, temperature=0.3).with_structured_output(AdversarialCase, include_raw=True)
+        judge_model = get_chat_model(api_key, temperature=0.2).with_structured_output(JudgeVerdict, include_raw=True)
+        prompts = {name: load_prompt(name) for name in ("Bull", "Bear", "Judge")}
+        style, horizon = twin.investment_thesis.style, twin.investment_thesis.horizon
+
+        pt = ct = n = judged = 0
         last_error = ""
         for sym, payload in data.items():
-            for perspective, prompt_tpl, action in (("bull", BULL_PROMPT, "buy"), ("bear", BEAR_PROMPT, "sell")):
+            cases: dict[str, AdversarialCase] = {}
+            vol = payload.get("indicators", {}).get("volatility_30d")
+            for perspective, action in (("bull", "buy"), ("bear", "sell")):
                 try:
-                    result = model.invoke(prompt_tpl.format(
-                        sym=sym, data=payload,
-                        style=twin.investment_thesis.style, horizon=twin.investment_thesis.horizon))
+                    prompt = render(prompts[perspective.capitalize()],
+                                    sym=sym, data=payload, style=style, horizon=horizon)
+                    result = model.invoke(prompt)
                     raw = result.get("raw")
                     if raw is not None:
                         p, c = usage_from(raw)
@@ -318,8 +324,8 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                     case = result["parsed"]
                     if case is None:
                         continue
+                    cases[perspective] = case
                     from app.risk.scoring import score_recommendation
-                    vol = payload.get("indicators", {}).get("volatility_30d")
                     try:
                         risk_score = score_recommendation(db, user_id, twin, sym, action, vol).score
                     except Exception:
@@ -335,11 +341,47 @@ def run_bull_bear(db: Session, user_id: int, twin: StrategyTwin, version_id: int
                 except Exception as exc:
                     last_error = str(exc)
                     continue  # one bad symbol/perspective shouldn't kill the run
+
+            # JUDGE: only when both sides actually argued
+            if "bull" in cases and "bear" in cases:
+                try:
+                    bull, bear = cases["bull"], cases["bear"]
+                    prompt = render(prompts["Judge"], sym=sym, data=payload, style=style,
+                                    horizon=horizon,
+                                    bull_strength=f"{bull.signal_strength:.0f}", bull_case=bull.thesis,
+                                    bull_points="; ".join(bull.key_points),
+                                    bear_strength=f"{bear.signal_strength:.0f}", bear_case=bear.thesis,
+                                    bear_points="; ".join(bear.key_points))
+                    result = judge_model.invoke(prompt)
+                    raw = result.get("raw")
+                    if raw is not None:
+                        p, c = usage_from(raw)
+                        pt, ct = pt + p, ct + c
+                    verdict = result["parsed"]
+                    if verdict is not None:
+                        action = verdict.action if verdict.action in ("buy", "sell", "hold") else "hold"
+                        from app.risk.scoring import score_recommendation
+                        try:
+                            risk_score = score_recommendation(db, user_id, twin, sym, action, vol).score
+                        except Exception:
+                            risk_score = None
+                        db.add(Recommendation(
+                            agent_run_id=run.id, user_id=user_id, symbol=sym, action=action,
+                            confidence=verdict.conviction / 100.0, risk_score=risk_score,
+                            thesis=verdict.rationale, invalidation=verdict.invalidation,
+                            data_used={"perspective": "judge", "signal_strength": verdict.conviction,
+                                       "action": action,
+                                       "key_points": [f"Bull's best: {verdict.strongest_bull_point}",
+                                                      f"Bear's best: {verdict.strongest_bear_point}"]},
+                        ))
+                        judged += 1
+                except Exception as exc:
+                    last_error = str(exc)
         if n == 0 and last_error:
             _finish_run(db, run, "", pt, ct, status="failed", error=last_error)
             return run
         missing = [s for s in symbols if s not in data]
-        summary = f"Bull & Bear debated {len(data)} stocks → {n} signals"
+        summary = f"Bull & Bear debated {len(data)} stocks → {n} signals, {judged} judge verdicts"
         if missing:
             summary += f" (no market data for {', '.join(missing)})"
         _finish_run(db, run, summary, pt, ct)

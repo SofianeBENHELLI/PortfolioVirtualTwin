@@ -8,14 +8,14 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 
 type Signal = {
-  signal_strength: number; thesis: string; key_points: string[];
+  signal_strength: number; action?: string; thesis: string; key_points: string[];
   invalidation: string; created_at: string;
 };
 type Stock = {
   symbol: string; added_at: string; price: number | null; data_as_of: string | null;
   indicators: Record<string, number | boolean>;
   fundamentals: Record<string, string | number>;
-  bull: Signal | null; bear: Signal | null;
+  bull: Signal | null; bear: Signal | null; judge: Signal | null;
 };
 
 const FUND_LABELS: [string, string][] = [
@@ -59,6 +59,18 @@ function SignalBadge({ kind, signal }: { kind: "bull" | "bear"; signal: Signal |
     ? strong ? "bg-emerald-600" : "bg-emerald-200 text-emerald-900 hover:bg-emerald-200"
     : strong ? "bg-red-600" : "bg-red-200 text-red-900 hover:bg-red-200";
   return <Badge className={cls}>{kind === "bull" ? "🐂 Buy" : "🐻 Sell"} {s.toFixed(0)}</Badge>;
+}
+
+function JudgeBadge({ signal }: { signal: Signal | null }) {
+  if (!signal) return <span className="text-xs text-zinc-400">⚖️ —</span>;
+  const action = (signal.action ?? "hold").toUpperCase();
+  const cls = action === "BUY" ? "bg-emerald-700" : action === "SELL" ? "bg-red-700" : "bg-zinc-600";
+  return (
+    <Badge className={`${cls} ring-2 ring-offset-1 ring-zinc-300`}
+      title={`Judge verdict: ${action}, conviction ${signal.signal_strength.toFixed(0)}/100`}>
+      ⚖️ {action} {signal.signal_strength.toFixed(0)}
+    </Badge>
+  );
 }
 
 export default function MyStocks() {
@@ -145,7 +157,7 @@ export default function MyStocks() {
         <Button onClick={() => runBullBear()} disabled={busyAgents || !llm || stocks.length === 0}
           className="bg-purple-700 hover:bg-purple-800"
           title="Debate every tracked stock">
-          {busyAgents ? "Debating… (≈30s)" : "🐂🐻 Bull & Bear: all tracked"}
+          {busyAgents ? "Debating… (≈45s)" : "🐂🐻 Bull & Bear: all tracked"}
         </Button>
       </div>
 
@@ -176,6 +188,7 @@ export default function MyStocks() {
                     {s.data_as_of ? `data: ${new Date(s.data_as_of).toLocaleString()}` : "press “Update open-source data”"}
                   </span>
                   <div className="ml-auto flex items-center gap-2">
+                    <JudgeBadge signal={s.judge} />
                     <SignalBadge kind="bull" signal={s.bull} />
                     <SignalBadge kind="bear" signal={s.bear} />
                     <button onClick={() => runBullBear([s.symbol])} disabled={busyAgents || !llm}
@@ -190,6 +203,24 @@ export default function MyStocks() {
                   </div>
                 </div>
 
+                {isOpen && s.judge && (
+                  <div className="mt-4 rounded-lg border-2 border-zinc-300 bg-zinc-50 p-3 text-sm">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="font-semibold">⚖️ Judge — consolidated recommendation:</span>
+                      <JudgeBadge signal={s.judge} />
+                      <span className="ml-auto text-xs text-zinc-400">{new Date(s.judge.created_at).toLocaleString()}</span>
+                    </div>
+                    <p className="mt-1.5">{s.judge.thesis}</p>
+                    {s.judge.key_points.length > 0 && (
+                      <ul className="mt-1.5 list-disc pl-4 text-zinc-700 space-y-0.5">
+                        {s.judge.key_points.map((k, i) => <li key={i}>{k}</li>)}
+                      </ul>
+                    )}
+                    <p className="mt-1.5 text-xs text-zinc-500">
+                      <span className="font-medium">Verdict flips if:</span> {s.judge.invalidation}
+                    </p>
+                  </div>
+                )}
                 {isOpen && (
                   <div className="mt-4 grid md:grid-cols-3 gap-4 text-sm">
                     <div className="rounded-lg border p-3">

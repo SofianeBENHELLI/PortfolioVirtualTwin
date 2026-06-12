@@ -29,8 +29,8 @@ type Readiness = { armed: boolean; all_passed: boolean;
   checks: { name: string; passed: boolean; detail: string }[] };
 type MacroStrip = { indicators: Record<string, { label: string; value: number; chg_1d_pct: number }>;
   regimes: Record<string, unknown> };
-type Signal = { signal_strength: number; created_at: string };
-type SignalMap = Record<string, { bull?: Signal; bear?: Signal }>;
+type Signal = { signal_strength: number; action?: string; created_at: string };
+type SignalMap = Record<string, { bull?: Signal; bear?: Signal; judge?: Signal }>;
 
 function Kpi({ label, value, sub, color }: { label: string; value: string; sub?: string; color?: string }) {
   return (
@@ -42,10 +42,16 @@ function Kpi({ label, value, sub, color }: { label: string; value: string; sub?:
   );
 }
 
-function SignalChips({ s }: { s?: { bull?: Signal; bear?: Signal } }) {
-  if (!s || (!s.bull && !s.bear)) return <span className="text-xs text-zinc-300">—</span>;
+function SignalChips({ s }: { s?: { bull?: Signal; bear?: Signal; judge?: Signal } }) {
+  if (!s || (!s.bull && !s.bear && !s.judge)) return <span className="text-xs text-zinc-300">—</span>;
   return (
     <span className="inline-flex gap-1">
+      {s.judge && (
+        <span className={`rounded px-1 text-xs font-bold text-white ${
+          s.judge.action === "buy" ? "bg-emerald-700" : s.judge.action === "sell" ? "bg-red-700" : "bg-zinc-600"}`}
+          title={`Judge: ${(s.judge.action ?? "hold").toUpperCase()} (conviction ${s.judge.signal_strength.toFixed(0)})`}>
+          ⚖️{s.judge.signal_strength.toFixed(0)}</span>
+      )}
       {s.bull && (
         <span className={`rounded px-1 text-xs font-medium ${s.bull.signal_strength >= 60 ? "bg-emerald-600 text-white" : "bg-emerald-100 text-emerald-800"}`}>
           🐂{s.bull.signal_strength.toFixed(0)}</span>

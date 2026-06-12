@@ -30,21 +30,22 @@ class BullBearRequest(BaseModel):
 
 
 def _latest_signals(db: Session, user_id: int, symbols: list[str]) -> dict[str, dict]:
-    """Newest bull and bear recommendation per symbol."""
+    """Newest bull / bear / judge recommendation per symbol."""
     if not symbols:
         return {}
     rows = db.scalars(
         select(Recommendation)
         .where(Recommendation.user_id == user_id, Recommendation.symbol.in_(symbols))
-        .order_by(Recommendation.created_at.desc()).limit(400)
+        .order_by(Recommendation.created_at.desc()).limit(600)
     ).all()
     out: dict[str, dict] = {s: {} for s in symbols}
     for r in rows:
         perspective = (r.data_used or {}).get("perspective")
-        if perspective not in ("bull", "bear") or perspective in out[r.symbol]:
+        if perspective not in ("bull", "bear", "judge") or perspective in out[r.symbol]:
             continue
         out[r.symbol][perspective] = {
             "signal_strength": (r.data_used or {}).get("signal_strength", r.confidence * 100),
+            "action": r.action,
             "thesis": r.thesis,
             "key_points": (r.data_used or {}).get("key_points", []),
             "invalidation": r.invalidation,
@@ -74,6 +75,7 @@ def _payload(db: Session, user_id: int, watched: list[WatchedStock]) -> list[dic
             "fundamentals": fundamentals,
             "bull": signals.get(w.symbol, {}).get("bull"),
             "bear": signals.get(w.symbol, {}).get("bear"),
+            "judge": signals.get(w.symbol, {}).get("judge"),
         })
     return out
 
