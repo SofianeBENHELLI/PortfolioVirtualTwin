@@ -313,6 +313,67 @@ class MacroReport(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
 
 
+class OptionContract(Base):
+    __tablename__ = "option_contracts"
+    __table_args__ = (UniqueConstraint("occ_symbol", name="uq_option_contract_occ_symbol"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    underlying_symbol: Mapped[str] = mapped_column(String(20), index=True)
+    occ_symbol: Mapped[str] = mapped_column(String(40), unique=True, index=True)
+    expiry: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD
+    right: Mapped[str] = mapped_column(String(4))  # call | put
+    strike: Mapped[float] = mapped_column(Float)
+    multiplier: Mapped[int] = mapped_column(Integer, default=100)
+    exercise_style: Mapped[str] = mapped_column(String(20), default="american")
+    exchange: Mapped[str] = mapped_column(String(20), default="")
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
+class OptionQuote(Base):
+    __tablename__ = "option_quotes"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    contract_id: Mapped[int] = mapped_column(ForeignKey("option_contracts.id"), index=True)
+    quote_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    bid: Mapped[float] = mapped_column(Float, default=0.0)
+    ask: Mapped[float] = mapped_column(Float, default=0.0)
+    bid_size: Mapped[int] = mapped_column(Integer, default=0)
+    ask_size: Mapped[int] = mapped_column(Integer, default=0)
+    mid: Mapped[float] = mapped_column(Float, default=0.0)
+    spread: Mapped[float] = mapped_column(Float, default=0.0)
+    spread_pct_mid: Mapped[float] = mapped_column(Float, default=0.0)
+    volume: Mapped[int] = mapped_column(Integer, default=0)
+    open_interest: Mapped[int] = mapped_column(Integer, default=0)
+    implied_volatility: Mapped[float | None] = mapped_column(Float, nullable=True)
+    delta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    gamma: Mapped[float | None] = mapped_column(Float, nullable=True)
+    vega: Mapped[float | None] = mapped_column(Float, nullable=True)
+    theta: Mapped[float | None] = mapped_column(Float, nullable=True)
+    rho: Mapped[float | None] = mapped_column(Float, nullable=True)
+    source_id: Mapped[str] = mapped_column(String(40), default="manual")
+    model_version: Mapped[str] = mapped_column(String(40), default="vendor")
+
+
+class OptionTradeCandidate(Base):
+    __tablename__ = "option_trade_candidates"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    portfolio_id: Mapped[int | None] = mapped_column(ForeignKey("portfolios.id"), nullable=True, index=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    strategy: Mapped[str] = mapped_column(String(80), index=True)
+    status: Mapped[str] = mapped_column(String(20), default="proposed", index=True)
+    risk_passed: Mapped[bool] = mapped_column(Boolean, default=False)
+    score: Mapped[float] = mapped_column(Float, default=0.0)
+    thesis: Mapped[str] = mapped_column(Text, default="")
+    market_regime: Mapped[str] = mapped_column(String(80), default="")
+    volatility_regime: Mapped[str] = mapped_column(String(80), default="")
+    legs: Mapped[list] = mapped_column(JSON, default=list)
+    payoff: Mapped[dict] = mapped_column(JSON, default=dict)
+    stress_results: Mapped[dict] = mapped_column(JSON, default=dict)
+    risk_checks: Mapped[list] = mapped_column(JSON, default=list)
+    memo: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+
+
 class SystemState(Base):
     """Single-row system flags (kill switch)."""
     __tablename__ = "system_state"
