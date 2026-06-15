@@ -77,6 +77,11 @@ class CandidateCreate(RiskCheckRequest):
     probability_estimate: float | None = None
 
 
+class CandidateDecision(BaseModel):
+    decision: Literal["approved", "rejected"]
+    note: str = ""
+
+
 class ContractUpsert(BaseModel):
     underlying_symbol: str
     occ_symbol: str
@@ -110,4 +115,3 @@ class QuoteCreate(BaseModel):
         if self.ask < self.bid:
             raise ValueError("ask cannot be below bid")
         return self
-

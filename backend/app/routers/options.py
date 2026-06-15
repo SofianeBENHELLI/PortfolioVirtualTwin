@@ -9,10 +9,20 @@ from sqlalchemy.orm import Session
 from app.audit.service import audit
 from app.core.db import get_db
 from app.core.security import get_current_user
-from app.models import OptionContract, OptionQuote, OptionTradeCandidate, Portfolio, User
+from app.models import (
+    OptionContract,
+    OptionPaperOrder,
+    OptionPaperOrderLeg,
+    OptionPosition,
+    OptionQuote,
+    OptionTradeCandidate,
+    Portfolio,
+    User,
+)
+from app.options import execution as option_execution
 from app.options.payoff import summarize_payoff
 from app.options.risk import evaluate_candidate
-from app.options.schemas import CandidateCreate, ContractUpsert, PayoffRequest, QuoteCreate, RiskCheckRequest
+from app.options.schemas import CandidateCreate, CandidateDecision, ContractUpsert, PayoffRequest, QuoteCreate, RiskCheckRequest
 from app.options.templates import STRATEGY_TEMPLATES
 
 router = APIRouter(prefix="/api/options", tags=["options"])
@@ -161,6 +171,53 @@ def list_candidates(portfolio_id: int | None = None, status: str | None = None,
     return [_candidate_out(c) for c in rows]
 
 
+@router.post("/candidates/{candidate_id}/decision")
+def decide_candidate(candidate_id: int, payload: CandidateDecision, user: User = Depends(get_current_user),
+                     db: Session = Depends(get_db)):
+    candidate = db.get(OptionTradeCandidate, candidate_id)
+    if candidate is None or candidate.user_id != user.id:
+        raise HTTPException(404, "Option candidate not found")
+    if payload.decision == "approved":
+        candidate = option_execution.approve_candidate(db, user.id, candidate, payload.note)
+    else:
+        candidate = option_execution.reject_candidate(db, user.id, candidate, payload.note)
+    return _candidate_out(candidate)
+
+
+@router.get("/orders")
+def list_option_orders(portfolio_id: int | None = None, user: User = Depends(get_current_user),
+                       db: Session = Depends(get_db)):
+    q = select(OptionPaperOrder).join(Portfolio, OptionPaperOrder.portfolio_id == Portfolio.id).where(Portfolio.user_id == user.id)
+    if portfolio_id is not None:
+        q = q.where(OptionPaperOrder.portfolio_id == portfolio_id)
+    rows = db.scalars(q.order_by(OptionPaperOrder.created_at.desc()).limit(200)).all()
+    return [_order_out(db, order) for order in rows]
+
+
+@router.get("/positions")
+def list_option_positions(portfolio_id: int | None = None, status: str | None = "open",
+                          user: User = Depends(get_current_user), db: Session = Depends(get_db)):
+    q = select(OptionPosition).join(Portfolio, OptionPosition.portfolio_id == Portfolio.id).where(Portfolio.user_id == user.id)
+    if portfolio_id is not None:
+        q = q.where(OptionPosition.portfolio_id == portfolio_id)
+    if status:
+        q = q.where(OptionPosition.status == status)
+    rows = db.scalars(q.order_by(OptionPosition.opened_at.desc()).limit(200)).all()
+    return [_position_out(position) for position in rows]
+
+
+@router.post("/positions/{position_id}/close")
+def close_option_position(position_id: int, payload: CandidateDecision, user: User = Depends(get_current_user),
+                          db: Session = Depends(get_db)):
+    if payload.decision != "approved":
+        raise HTTPException(422, "close requires decision='approved'")
+    position = db.get(OptionPosition, position_id)
+    if position is None:
+        raise HTTPException(404, "Option position not found")
+    position = option_execution.close_position(db, user.id, position, payload.note)
+    return _position_out(position)
+
+
 def _decision_memo(payload: CandidateCreate, evaluation: dict) -> dict:
     failed = [check for check in evaluation["risk_checks"] if not check["passed"]]
     payoff = evaluation["payoff"]
@@ -248,4 +305,56 @@ def _candidate_out(candidate: OptionTradeCandidate) -> dict:
         "risk_checks": candidate.risk_checks,
         "memo": candidate.memo,
         "created_at": candidate.created_at.isoformat(),
+    }
+
+
+def _order_out(db: Session, order: OptionPaperOrder) -> dict:
+    legs = db.scalars(select(OptionPaperOrderLeg).where(OptionPaperOrderLeg.order_id == order.id)).all()
+    return {
+        "id": order.id,
+        "candidate_id": order.candidate_id,
+        "portfolio_id": order.portfolio_id,
+        "ticker": order.ticker,
+        "strategy": order.strategy,
+        "intent": order.intent,
+        "status": order.status,
+        "net_debit": order.net_debit,
+        "mid_value": order.mid_value,
+        "commission": order.commission,
+        "detail": order.detail,
+        "created_at": order.created_at.isoformat(),
+        "filled_at": order.filled_at.isoformat() if order.filled_at else None,
+        "legs": [{
+            "id": leg.id,
+            "action": leg.action,
+            "right": leg.right,
+            "strike": leg.strike,
+            "expiry": leg.expiry,
+            "qty": leg.qty,
+            "multiplier": leg.multiplier,
+            "fill_price": leg.fill_price,
+            "fill_value": leg.fill_value,
+            "status": leg.status,
+        } for leg in legs],
+    }
+
+
+def _position_out(position: OptionPosition) -> dict:
+    return {
+        "id": position.id,
+        "candidate_id": position.candidate_id,
+        "portfolio_id": position.portfolio_id,
+        "ticker": position.ticker,
+        "strategy": position.strategy,
+        "status": position.status,
+        "legs": position.legs,
+        "entry_debit": position.entry_debit,
+        "current_value": position.current_value,
+        "max_loss": position.max_loss,
+        "max_gain": position.max_gain,
+        "commissions": position.commissions,
+        "realized_pnl": position.realized_pnl,
+        "unrealized_pnl": position.unrealized_pnl,
+        "opened_at": position.opened_at.isoformat(),
+        "closed_at": position.closed_at.isoformat() if position.closed_at else None,
     }

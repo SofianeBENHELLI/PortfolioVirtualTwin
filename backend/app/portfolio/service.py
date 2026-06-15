@@ -8,7 +8,7 @@ import numpy as np
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.models import Asset, PaperOrder, Portfolio, PortfolioSnapshot, Position
+from app.models import Asset, OptionPaperOrder, OptionPosition, PaperOrder, Portfolio, PortfolioSnapshot, Position
 
 
 def positions_with_prices(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> list[dict]:
@@ -26,14 +26,42 @@ def positions_with_prices(db: Session, portfolio: Portfolio, prices: dict[str, f
     return sorted(out, key=lambda x: -x["value"])
 
 
+def option_positions(db: Session, portfolio: Portfolio) -> list[dict]:
+    out = []
+    for p in db.scalars(select(OptionPosition).where(OptionPosition.portfolio_id == portfolio.id,
+                                                     OptionPosition.status == "open")):
+        out.append({
+            "symbol": f"{p.ticker} {p.strategy} #{p.id}",
+            "ticker": p.ticker,
+            "asset_class": "option_strategy",
+            "strategy": p.strategy,
+            "qty": 1,
+            "avg_entry_price": p.entry_debit,
+            "price": p.current_value,
+            "value": p.current_value,
+            "unrealized_pnl": p.unrealized_pnl,
+            "unrealized_pnl_pct": (p.unrealized_pnl / abs(p.entry_debit) * 100) if p.entry_debit else 0.0,
+            "realized_pnl": p.realized_pnl,
+            "max_loss": p.max_loss,
+            "max_gain": p.max_gain,
+            "opened_at": p.opened_at.isoformat(),
+            "legs": p.legs,
+        })
+    return sorted(out, key=lambda x: -abs(x["value"]))
+
+
 def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict:
     pos = positions_with_prices(db, portfolio, prices)
+    opt_pos = option_positions(db, portfolio)
+    all_pos = pos + opt_pos
     positions_value = sum(p["value"] for p in pos)
+    options_value = sum(p["value"] for p in opt_pos)
     equity = portfolio.cash + positions_value
-    unrealized = sum(p["unrealized_pnl"] for p in pos)
-    realized = sum(p["realized_pnl"] for p in pos) + _closed_realized(db, portfolio)
+    equity += options_value
+    unrealized = sum(p["unrealized_pnl"] for p in all_pos)
+    realized = sum(p["realized_pnl"] for p in pos) + _closed_realized(db, portfolio) + _closed_options_realized(db, portfolio)
     # real (tracked) portfolios have no cash leg here — P&L is measured against cost basis
-    cost_basis = sum(p["qty"] * p["avg_entry_price"] for p in pos)
+    cost_basis = sum(p["qty"] * p["avg_entry_price"] for p in pos) + sum(abs(p["avg_entry_price"]) for p in opt_pos)
     baseline = cost_basis if portfolio.kind == "real_tracked" else portfolio.initial_cash
     total_pnl = equity - baseline
 
@@ -56,8 +84,8 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
 
     # concentration
     sectors: dict[str, str] = {}
-    if pos:
-        symbols = [p["symbol"] for p in pos]
+    if all_pos:
+        symbols = [p.get("ticker", p["symbol"]) for p in all_pos]
         for a in db.scalars(select(Asset).where(Asset.symbol.in_(symbols))):
             sectors[a.symbol] = a.sector
         from app.models import MarketDataSnapshot
@@ -67,32 +95,37 @@ def summary(db: Session, portfolio: Portfolio, prices: dict[str, float]) -> dict
             if sector:
                 sectors[snap.symbol] = str(sector)
     sector_weights: dict[str, float] = {}
-    for p in pos:
-        sec = sectors.get(p["symbol"], "Unknown")
+    for p in all_pos:
+        sec = sectors.get(p.get("ticker", p["symbol"]), "Unknown")
         sector_weights[sec] = sector_weights.get(sec, 0.0) + (p["value"] / equity * 100 if equity else 0.0)
-    top_weight = max((p["value"] / equity * 100 for p in pos), default=0.0) if equity else 0.0
+    top_weight = max((abs(p["value"]) / equity * 100 for p in all_pos), default=0.0) if equity else 0.0
 
     open_orders = db.scalars(select(PaperOrder).where(PaperOrder.portfolio_id == portfolio.id,
                                                       PaperOrder.status == "open")).all()
-    best = max(pos, key=lambda p: p["unrealized_pnl"], default=None)
-    worst = min(pos, key=lambda p: p["unrealized_pnl"], default=None)
+    open_option_orders = db.scalars(select(OptionPaperOrder).where(OptionPaperOrder.portfolio_id == portfolio.id,
+                                                                   OptionPaperOrder.status == "open")).all()
+    best = max(all_pos, key=lambda p: p["unrealized_pnl"], default=None)
+    worst = min(all_pos, key=lambda p: p["unrealized_pnl"], default=None)
 
     return {
         "portfolio_id": portfolio.id, "name": portfolio.name, "mode": portfolio.mode,
         "kind": portfolio.kind,
-        "broker": portfolio.broker, "cash": portfolio.cash, "positions_value": positions_value,
+        "broker": portfolio.broker, "cash": portfolio.cash, "positions_value": positions_value + options_value,
+        "stock_positions_value": positions_value, "option_positions_value": options_value,
         "equity": equity, "initial_cash": portfolio.initial_cash, "cost_basis": cost_basis,
         "total_pnl": total_pnl, "total_pnl_pct": total_pnl / baseline * 100 if baseline else 0.0,
         "daily_pnl": daily_pnl, "daily_pnl_pct": daily_pnl / day_base * 100 if day_base else 0.0,
         "unrealized_pnl": unrealized, "realized_pnl": realized,
         "drawdown_pct": drawdown_pct, "max_drawdown_pct": max_dd_pct,
         "volatility_pct": vol_pct,
-        "n_positions": len(pos), "top_position_weight_pct": top_weight,
+        "n_positions": len(all_pos), "n_stock_positions": len(pos), "n_option_positions": len(opt_pos),
+        "top_position_weight_pct": top_weight,
         "sector_weights": sector_weights,
-        "open_orders": len(open_orders),
+        "open_orders": len(open_orders) + len(open_option_orders),
         "best_position": best["symbol"] if best else None,
         "worst_position": worst["symbol"] if worst else None,
-        "positions": pos,
+        "positions": all_pos,
+        "option_positions": opt_pos,
     }
 
 
@@ -106,6 +139,12 @@ def equity_history(db: Session, portfolio: Portfolio) -> dict:
 
 def _closed_realized(db: Session, portfolio: Portfolio) -> float:
     closed = db.scalars(select(Position).where(Position.portfolio_id == portfolio.id, Position.qty <= 0)).all()
+    return sum(p.realized_pnl for p in closed)
+
+
+def _closed_options_realized(db: Session, portfolio: Portfolio) -> float:
+    closed = db.scalars(select(OptionPosition).where(OptionPosition.portfolio_id == portfolio.id,
+                                                     OptionPosition.status == "closed")).all()
     return sum(p.realized_pnl for p in closed)
 
 

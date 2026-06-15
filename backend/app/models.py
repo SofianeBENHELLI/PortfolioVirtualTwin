@@ -374,6 +374,59 @@ class OptionTradeCandidate(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
 
 
+class OptionPaperOrder(Base):
+    __tablename__ = "option_paper_orders"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("option_trade_candidates.id"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), index=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    strategy: Mapped[str] = mapped_column(String(80), default="")
+    intent: Mapped[str] = mapped_column(String(10), default="open")  # open | close
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    net_debit: Mapped[float] = mapped_column(Float, default=0.0)
+    mid_value: Mapped[float] = mapped_column(Float, default=0.0)
+    commission: Mapped[float] = mapped_column(Float, default=0.0)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, index=True)
+    filled_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class OptionPaperOrderLeg(Base):
+    __tablename__ = "option_paper_order_legs"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("option_paper_orders.id"), index=True)
+    action: Mapped[str] = mapped_column(String(20))
+    right: Mapped[str] = mapped_column(String(4))
+    strike: Mapped[float] = mapped_column(Float)
+    expiry: Mapped[str] = mapped_column(String(10))
+    qty: Mapped[int] = mapped_column(Integer)
+    multiplier: Mapped[int] = mapped_column(Integer, default=100)
+    fill_price: Mapped[float] = mapped_column(Float, default=0.0)
+    fill_value: Mapped[float] = mapped_column(Float, default=0.0)
+    status: Mapped[str] = mapped_column(String(20), default="filled")
+
+
+class OptionPosition(Base):
+    __tablename__ = "option_positions"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    candidate_id: Mapped[int] = mapped_column(ForeignKey("option_trade_candidates.id"), index=True)
+    portfolio_id: Mapped[int] = mapped_column(ForeignKey("portfolios.id"), index=True)
+    ticker: Mapped[str] = mapped_column(String(20), index=True)
+    strategy: Mapped[str] = mapped_column(String(80), default="")
+    status: Mapped[str] = mapped_column(String(20), default="open", index=True)
+    legs: Mapped[list] = mapped_column(JSON, default=list)
+    entry_debit: Mapped[float] = mapped_column(Float, default=0.0)
+    current_value: Mapped[float] = mapped_column(Float, default=0.0)
+    max_loss: Mapped[float | None] = mapped_column(Float, nullable=True)
+    max_gain: Mapped[float | None] = mapped_column(Float, nullable=True)
+    commissions: Mapped[float] = mapped_column(Float, default=0.0)
+    realized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    unrealized_pnl: Mapped[float] = mapped_column(Float, default=0.0)
+    opened_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow)
+
+
 class SystemState(Base):
     """Single-row system flags (kill switch)."""
     __tablename__ = "system_state"
