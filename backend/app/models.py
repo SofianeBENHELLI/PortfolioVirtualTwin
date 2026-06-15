@@ -116,7 +116,7 @@ class Recommendation(Base):
     agent_run_id: Mapped[int] = mapped_column(ForeignKey("agent_runs.id"), index=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     symbol: Mapped[str] = mapped_column(String(20), index=True)
-    action: Mapped[str] = mapped_column(String(10))  # buy | sell | hold | hedge
+    action: Mapped[str] = mapped_column(String(10))  # buy | sell | hold | hedge | track
     confidence: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
     risk_score: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-100, deterministic
     thesis: Mapped[str] = mapped_column(Text, default="")

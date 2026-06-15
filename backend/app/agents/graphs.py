@@ -110,6 +110,19 @@ FUNDAMENTAL_KEYS = (
 )
 
 
+DEFAULT_DISCOVERY_UNIVERSE = [
+    "AAPL", "MSFT", "NVDA", "AMZN", "GOOGL", "META", "AVGO", "TSLA", "BRK-B", "JPM",
+    "LLY", "V", "UNH", "XOM", "MA", "COST", "HD", "PG", "NFLX", "AMD",
+    "CRM", "ORCL", "ADBE", "QCOM", "CSCO", "INTU", "NOW", "AMAT", "TXN", "IBM",
+    "MU", "PANW", "CRWD", "SNOW", "PLTR", "UBER", "ABNB", "BKNG", "SHOP", "MELI",
+    "NKE", "SBUX", "MCD", "CMG", "TGT", "WMT", "KO", "PEP", "MNST", "COKE",
+    "CAT", "DE", "GE", "HON", "BA", "LMT", "RTX", "ETN", "EMR", "PH",
+    "GS", "MS", "BAC", "C", "AXP", "BLK", "SCHW", "BX", "KKR", "SPGI",
+    "JNJ", "MRK", "ABBV", "PFE", "TMO", "DHR", "ISRG", "VRTX", "REGN", "SYK",
+    "NEE", "DUK", "SO", "CEG", "SLB", "CVX", "COP", "EOG", "LIN", "SHW",
+]
+
+
 def gather_symbol_data(symbols: list[str], benchmark: str) -> dict[str, dict]:
     """Open-source data bundle per symbol: latest price, technical indicators (computed
     from OHLCV history), and yfinance fundamentals. Shared by research, bull/bear, and
@@ -132,6 +145,336 @@ def gather_symbol_data(symbols: list[str], benchmark: str) -> dict[str, dict]:
             entry["fundamentals"] = {}
         data[sym] = entry
     return data
+
+
+# --------------------------------------------------------------- StockDiscovery
+# Deterministic watchlist screener. It behaves like an agent run (AgentRun +
+# Recommendation rows), but does not require an LLM: every score is reproducible.
+
+def _clamp(v: float, lo: float = 0.0, hi: float = 100.0) -> float:
+    return max(lo, min(hi, v))
+
+
+def _num(v, default: float | None = None) -> float | None:
+    try:
+        if v is None:
+            return default
+        return float(v)
+    except (TypeError, ValueError):
+        return default
+
+
+def _valuation_risk(f: dict) -> str:
+    pe = _num(f.get("forwardPE"), _num(f.get("trailingPE")))
+    pb = _num(f.get("priceToBook"))
+    if pe is None and pb is None:
+        return "moderate"
+    if (pe is not None and (pe < 0 or pe > 70)) or (pb is not None and pb > 18):
+        return "extreme"
+    if (pe is not None and pe > 45) or (pb is not None and pb > 10):
+        return "high"
+    if (pe is not None and pe > 28) or (pb is not None and pb > 5):
+        return "moderate"
+    return "low"
+
+
+def _quality_score(f: dict) -> float:
+    revenue = (_num(f.get("revenueGrowth"), 0.0) or 0.0) * 100
+    earnings = (_num(f.get("earningsGrowth"), 0.0) or 0.0) * 100
+    profit = (_num(f.get("profitMargins"), 0.0) or 0.0) * 100
+    gross = (_num(f.get("grossMargins"), 0.0) or 0.0) * 100
+    debt = _num(f.get("debtToEquity"))
+    fcf = _num(f.get("freeCashflow"))
+    score = 45 + revenue * 0.35 + earnings * 0.25 + profit * 0.25 + gross * 0.08
+    if fcf is not None:
+        score += 6 if fcf > 0 else -8
+    if debt is not None:
+        if debt < 50:
+            score += 5
+        elif debt > 200:
+            score -= 12
+        elif debt > 100:
+            score -= 6
+    return round(_clamp(score), 1)
+
+
+def _technical_score(ind: dict) -> float:
+    score = 50.0
+    momentum = _num(ind.get("momentum_6m_return_pct"))
+    if momentum is not None:
+        score += max(-25, min(50, momentum)) * 0.45
+    rs = _num(ind.get("relative_strength"))
+    if rs is not None:
+        score += max(-25, min(25, rs)) * 0.55
+    if ind.get("price_above_200_day_average") is True:
+        score += 9
+    elif ind.get("price_above_200_day_average") is False:
+        score -= 10
+    if ind.get("price_above_50_day_average") is True:
+        score += 5
+    elif ind.get("price_above_50_day_average") is False:
+        score -= 4
+    rsi = _num(ind.get("rsi_14"))
+    if rsi is not None:
+        if 48 <= rsi <= 68:
+            score += 6
+        elif 68 < rsi <= 75 or 40 <= rsi < 48:
+            score += 2
+        elif rsi > 78 or rsi < 32:
+            score -= 8
+    if ind.get("volume_confirmation") is True:
+        score += 3
+    return round(_clamp(score), 1)
+
+
+def _risk_score(ind: dict, f: dict, macro: dict | None) -> tuple[float, str, list[str]]:
+    vol = _num(ind.get("volatility_30d"), 35.0) or 35.0
+    beta = _num(f.get("beta"), 1.0) or 1.0
+    debt = _num(f.get("debtToEquity"), 75.0) or 75.0
+    valuation = _valuation_risk(f)
+    val_points = {"low": 6, "moderate": 15, "high": 26, "extreme": 38}[valuation]
+    macro_points = 0.0
+    notes: list[str] = []
+    if macro:
+        if macro.get("risk_off"):
+            macro_points += 12
+            notes.append("risk-off macro")
+        if macro.get("volatility_regime") == "high":
+            macro_points += 14
+            notes.append("high volatility")
+        elif macro.get("volatility_regime") == "elevated":
+            macro_points += 7
+            notes.append("elevated volatility")
+        if macro.get("war_risk") == "high":
+            macro_points += 8
+            notes.append("high war-risk signal")
+    score = vol * 0.35 + max(0.0, beta - 0.7) * 18 + min(debt, 250) * 0.05 + val_points + macro_points
+    score = round(_clamp(score), 1)
+    if score < 28:
+        level = "low"
+    elif score < 55:
+        level = "moderate"
+    elif score < 75:
+        level = "elevated"
+    else:
+        level = "high"
+    if valuation in ("high", "extreme"):
+        notes.append(f"{valuation} valuation risk")
+    if vol > 45:
+        notes.append(f"high realized volatility ({vol:.0f}%)")
+    return score, level, notes
+
+
+def _target_growth_pct(price: float, ind: dict, f: dict, quality: float, technical: float,
+                       risk_score: float, macro: dict | None) -> float:
+    analyst_target = _num(f.get("targetMeanPrice"))
+    analyst_upside = None
+    if price > 0 and analyst_target and price * 0.2 < analyst_target < price * 3:
+        analyst_upside = (analyst_target / price - 1) * 100
+    revenue = (_num(f.get("revenueGrowth"), 0.0) or 0.0) * 100
+    earnings = (_num(f.get("earningsGrowth"), 0.0) or 0.0) * 100
+    momentum = _num(ind.get("momentum_6m_return_pct"), 0.0) or 0.0
+    rs = _num(ind.get("relative_strength"), 0.0) or 0.0
+    model_upside = 8 + revenue * 0.30 + earnings * 0.20 + momentum * 0.18 + rs * 0.20
+    model_upside += (quality - 50) * 0.08 + (technical - 50) * 0.10
+    raw = model_upside if analyst_upside is None else analyst_upside * 0.55 + model_upside * 0.45
+    if macro and macro.get("risk_off"):
+        raw *= 0.82
+    raw -= max(0.0, risk_score - 55) * 0.12
+    return round(_clamp(raw, -15.0, 80.0), 1)
+
+
+def _macro_fit(sector: str, risk_score: float, macro: dict | None) -> tuple[float, list[str]]:
+    if not macro:
+        return 60.0, ["no macro snapshot"]
+    score = 68.0
+    notes: list[str] = []
+    defensive = {"Healthcare", "Consumer Defensive", "Utilities"}
+    cyclical = {"Consumer Cyclical", "Financial Services", "Industrials", "Technology"}
+    if macro.get("risk_off"):
+        score -= 8
+        notes.append("risk-off regime favors selectivity")
+        if sector in defensive:
+            score += 12
+            notes.append(f"{sector} defensive tilt")
+        if sector in cyclical and risk_score > 55:
+            score -= 8
+            notes.append(f"{sector} cyclicality plus elevated risk")
+    if macro.get("oil_shock"):
+        if sector == "Energy":
+            score += 10
+            notes.append("energy may benefit from oil shock")
+        elif sector in {"Consumer Cyclical", "Industrials"}:
+            score -= 4
+            notes.append("oil shock can pressure margins/demand")
+    if macro.get("volatility_regime") == "high" and risk_score > 65:
+        score -= 10
+        notes.append("high-vol regime penalizes high-risk names")
+    return round(_clamp(score), 1), notes or ["macro regime not restrictive"]
+
+
+def _strategy_fit(twin: StrategyTwin, observed: dict) -> tuple[float, list[str]]:
+    notes: list[str] = []
+    evaluable = 0
+    passed = 0
+    for rule in twin.entry_rules:
+        result = rule.evaluate(observed.get(rule.metric))
+        if result is None:
+            continue
+        evaluable += 1
+        passed += 1 if result else 0
+        notes.append(f"{rule.describe()}: {'pass' if result else 'fail'}")
+    if evaluable:
+        return round(45 + 55 * passed / evaluable, 1), notes
+
+    style = twin.investment_thesis.style.lower()
+    score = 58.0
+    if "growth" in style:
+        score += max(-10, min(16, (observed.get("revenue_growth") or 0) * 45))
+    if "quality" in style:
+        score += (observed.get("quality_score", 50) - 50) * 0.18
+    if "momentum" in style or "trend" in style:
+        score += (observed.get("technical_score", 50) - 50) * 0.20
+    if "value" in style:
+        score += {"low": 12, "moderate": 2, "high": -10, "extreme": -18}[observed.get("valuation_risk", "moderate")]
+    return round(_clamp(score), 1), notes or [f"style fit: {twin.investment_thesis.style}"]
+
+
+def _stock_discovery_row(symbol: str, payload: dict, twin: StrategyTwin, macro: dict | None) -> dict:
+    price = _num(payload.get("price"), 0.0) or 0.0
+    ind = payload.get("indicators", {}) or {}
+    f = payload.get("fundamentals", {}) or {}
+    sector = str(f.get("sector") or "Unknown")
+    quality = _quality_score(f)
+    technical = _technical_score(ind)
+    risk_score, risk_level, risk_notes = _risk_score(ind, f, macro)
+    target_growth = _target_growth_pct(price, ind, f, quality, technical, risk_score, macro)
+    valuation = _valuation_risk(f)
+    observed = {
+        **ind,
+        "quality_score": quality,
+        "valuation_risk": valuation,
+        "risk_score": risk_score,
+        "revenue_growth": _num(f.get("revenueGrowth"), 0.0) or 0.0,
+        "technical_score": technical,
+    }
+    strategy_fit, strategy_notes = _strategy_fit(twin, observed)
+    macro_fit, macro_notes = _macro_fit(sector, risk_score, macro)
+    potential = _clamp((target_growth + 5) / 50 * 100)
+    risk_penalty = risk_score * 0.22
+    score = (
+        potential * 0.30
+        + quality * 0.20
+        + technical * 0.20
+        + strategy_fit * 0.15
+        + macro_fit * 0.10
+        + (100 if ind.get("volume_confirmation") else 55) * 0.05
+        - risk_penalty
+    )
+    score = round(_clamp(score), 1)
+    reasons = [
+        f"target growth {target_growth:.1f}%",
+        f"quality {quality:.0f}/100",
+        f"technical {technical:.0f}/100",
+        f"strategy fit {strategy_fit:.0f}/100",
+    ]
+    if macro_notes:
+        reasons.append(macro_notes[0])
+    invalidation = (
+        "Re-run if price loses the 50/200-day trend, macro regime turns risk-off/high-vol, "
+        "growth estimates deteriorate, or risk level moves to high."
+    )
+    return {
+        "symbol": symbol,
+        "price": price,
+        "sector": sector,
+        "score": score,
+        "confidence": round(score / 100, 3),
+        "target_growth_pct": target_growth,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "thesis": f"{symbol} ranks as a tracking candidate with {target_growth:.1f}% target growth, "
+                  f"{risk_level} risk, and a {score:.0f}/100 discovery score.",
+        "invalidation": invalidation,
+        "data_used": {
+            "perspective": "stock_discovery",
+            "signal_strength": score,
+            "target_growth_pct": target_growth,
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "sector": sector,
+            "price": price,
+            "scores": {
+                "quality": quality,
+                "technical": technical,
+                "strategy_fit": strategy_fit,
+                "macro_fit": macro_fit,
+                "potential": round(potential, 1),
+            },
+            "valuation_risk": valuation,
+            "key_points": reasons,
+            "risk_factors": risk_notes,
+            "strategy_fit_notes": strategy_notes[:6],
+            "macro_notes": macro_notes,
+            "inputs": payload,
+        },
+    }
+
+
+def run_stock_discovery(db: Session, user_id: int, twin: StrategyTwin, version_id: int | None,
+                        symbols: list[str], limit: int = 20) -> AgentRun:
+    symbols = _normalize_symbols(symbols or DEFAULT_DISCOVERY_UNIVERSE)[:120]
+    limit = max(1, min(50, limit))
+    run = AgentRun(user_id=user_id, graph="stock_discovery", strategy_version_id=version_id,
+                   inputs={"symbols": symbols, "limit": limit})
+    db.add(run)
+    db.commit()
+    try:
+        data = gather_symbol_data(symbols, twin.benchmark)
+        from app.models import MacroSnapshot
+        macro = db.scalar(select(MacroSnapshot).order_by(MacroSnapshot.as_of.desc()).limit(1))
+        rows = [
+            _stock_discovery_row(sym, payload, twin, macro.regimes if macro else None)
+            for sym, payload in data.items()
+            if payload.get("price")
+        ]
+        rows.sort(key=lambda r: (r["score"], r["target_growth_pct"]), reverse=True)
+        selected = rows[:limit]
+        for row in selected:
+            db.add(Recommendation(
+                agent_run_id=run.id,
+                user_id=user_id,
+                symbol=row["symbol"],
+                action="track",
+                confidence=row["confidence"],
+                risk_score=row["risk_score"],
+                thesis=row["thesis"],
+                invalidation=row["invalidation"],
+                data_used=row["data_used"],
+            ))
+        missing = [s for s in symbols if s not in data]
+        summary = f"Stock Discovery ranked {len(rows)} symbols and proposed {len(selected)} to track"
+        if missing:
+            summary += f" ({len(missing)} with no market data)"
+        _finish_run(db, run, summary, 0, 0)
+        audit(db, "agent.stock_discovery_done", user_id=user_id, actor="agent", entity="agent_run",
+              entity_id=run.id, payload={"ranked": len(rows), "selected": len(selected)})
+        db.commit()
+    except Exception as exc:
+        _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
+    return run
+
+
+def _normalize_symbols(symbols: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for sym in symbols:
+        clean = str(sym).strip().upper()
+        if not clean or clean in seen:
+            continue
+        seen.add(clean)
+        out.append(clean)
+    return out
 
 
 def _gather_node(state: ResearchState) -> dict:
