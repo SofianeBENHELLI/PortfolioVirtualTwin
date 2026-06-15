@@ -13,6 +13,7 @@ from app.core.security import get_current_user
 from app.execution import service as exec_service
 from app.models import AgentRun, PerformanceReport, Recommendation, User
 from app.strategy import service as strategy_service
+from app.strategy.twin import StrategyTwin
 
 router = APIRouter(prefix="/api/agents", tags=["agents"])
 
@@ -34,6 +35,21 @@ class ProposalRequest(BaseModel):
 
 class ExplainRequest(BaseModel):
     portfolio_id: int
+
+
+class StockDiscoveryRequest(BaseModel):
+    strategy_id: int | None = None
+    symbols: list[str] = []
+    limit: int = 20
+    add_to_watchlist: bool = False
+
+
+class StrategicDiscoveryRequest(BaseModel):
+    themes: list[str] = []
+    symbols: list[str] = []
+    limit: int = 20
+    horizon_years: int = 5
+    add_to_watchlist: bool = False
 
 
 @router.get("/status")
@@ -78,6 +94,53 @@ def proposals(payload: ProposalRequest, user: User = Depends(get_current_user), 
             "note": "Proposals passed through the deterministic risk gateway; pending your approval in the Trading Console."}
 
 
+@router.post("/stock-discovery")
+def stock_discovery(payload: StockDiscoveryRequest, user: User = Depends(get_current_user),
+                    db: Session = Depends(get_db)):
+    if payload.limit < 1 or payload.limit > 50:
+        raise HTTPException(422, "limit must be between 1 and 50")
+    if payload.strategy_id is not None:
+        version, twin = strategy_service.active_twin(db, user.id, payload.strategy_id)
+        version_id = version.id
+    else:
+        twin = StrategyTwin(strategy_name="Stock discovery",
+                            investment_thesis={"style": "quality growth",
+                                               "horizon": "3 to 12 months",
+                                               "description": "Find liquid stocks worth tracking."})
+        version_id = None
+    symbols = payload.symbols or twin.universe.symbols or graphs.DEFAULT_DISCOVERY_UNIVERSE
+    run = graphs.run_stock_discovery(db, user.id, twin, version_id, symbols, payload.limit)
+    bus.publish("agent_run", {"id": run.id, "graph": "stock_discovery", "status": run.status})
+    if run.status == "failed":
+        raise HTTPException(502, f"Stock discovery failed: {friendly_llm_error(run.error)}")
+    out = _run_out(db, run)
+    if payload.add_to_watchlist:
+        out["added_to_watchlist"] = _add_run_recs_to_watchlist(db, user.id, run.id, "watchlist.discovery_added")
+    return out
+
+
+@router.post("/strategic-discovery")
+def strategic_discovery(payload: StrategicDiscoveryRequest, user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    if payload.limit < 1 or payload.limit > 50:
+        raise HTTPException(422, "limit must be between 1 and 50")
+    if payload.horizon_years < 2 or payload.horizon_years > 10:
+        raise HTTPException(422, "horizon_years must be between 2 and 10")
+    run = graphs.run_strategic_discovery(
+        db, user.id, payload.themes, payload.symbols, payload.limit, payload.horizon_years
+    )
+    bus.publish("agent_run", {"id": run.id, "graph": "strategic_discovery", "status": run.status})
+    if run.status == "failed":
+        raise HTTPException(502, f"Strategic discovery failed: {friendly_llm_error(run.error)}")
+    out = _run_out(db, run)
+    out["selected_themes"] = run.inputs.get("themes", [])
+    out["horizon_years"] = run.inputs.get("horizon_years", payload.horizon_years)
+    if payload.add_to_watchlist:
+        out["added_to_watchlist"] = _add_run_recs_to_watchlist(db, user.id, run.id,
+                                                               "watchlist.strategic_discovery_added")
+    return out
+
+
 @router.post("/explain")
 def explain(payload: ExplainRequest, user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     require_llm(db, user.id)
@@ -113,10 +176,22 @@ def reports(user: User = Depends(get_current_user), db: Session = Depends(get_db
 
 
 def _rec_out(r: Recommendation) -> dict:
-    return {"id": r.id, "symbol": r.symbol, "action": r.action, "confidence": r.confidence,
-            "risk_score": r.risk_score,
-            "thesis": r.thesis, "invalidation": r.invalidation, "data_used": r.data_used,
-            "created_at": r.created_at.isoformat()}
+    data = r.data_used or {}
+    out = {"id": r.id, "symbol": r.symbol, "action": r.action, "confidence": r.confidence,
+           "risk_score": r.risk_score,
+           "thesis": r.thesis, "invalidation": r.invalidation, "data_used": data,
+           "created_at": r.created_at.isoformat()}
+    if "target_growth_pct" in data:
+        out["target_growth_pct"] = data["target_growth_pct"]
+    if "risk_level" in data:
+        out["risk_level"] = data["risk_level"]
+    if "signal_strength" in data:
+        out["signal_strength"] = data["signal_strength"]
+    if "strategic_themes" in data:
+        out["strategic_themes"] = data["strategic_themes"]
+    if "horizon_years" in data:
+        out["horizon_years"] = data["horizon_years"]
+    return out
 
 
 def _run_out(db: Session, r: AgentRun, include_recs: bool = True) -> dict:
@@ -129,3 +204,20 @@ def _run_out(db: Session, r: AgentRun, include_recs: bool = True) -> dict:
         recs = db.scalars(select(Recommendation).where(Recommendation.agent_run_id == r.id)).all()
         out["recommendations"] = [_rec_out(x) for x in recs]
     return out
+
+
+def _add_run_recs_to_watchlist(db: Session, user_id: int, run_id: int, audit_action: str) -> list[str]:
+    from app.audit.service import audit
+    from app.models import WatchedStock
+
+    added = []
+    for rec in db.scalars(select(Recommendation).where(Recommendation.agent_run_id == run_id)):
+        exists = db.scalar(select(WatchedStock).where(WatchedStock.user_id == user_id,
+                                                      WatchedStock.symbol == rec.symbol))
+        if exists is None:
+            db.add(WatchedStock(user_id=user_id, symbol=rec.symbol))
+            added.append(rec.symbol)
+    if added:
+        audit(db, audit_action, user_id=user_id, payload={"symbols": added})
+        db.commit()
+    return added

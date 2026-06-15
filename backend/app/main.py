@@ -9,7 +9,7 @@ from app.core.config import get_settings
 from app.core.db import Base, engine
 from app.core.events import bus
 from app.monitor.scheduler import monitor_loop
-from app.routers import agents, auth, backtests, macro, portfolios, strategies, system, watchlist
+from app.routers import agents, auth, backtests, macro, options, portfolios, strategies, system, watchlist
 
 logging.basicConfig(level=logging.INFO)
 settings = get_settings()
@@ -72,4 +72,5 @@ app.include_router(backtests.router)
 app.include_router(agents.router)
 app.include_router(watchlist.router)
 app.include_router(macro.router)
+app.include_router(options.router)
 app.include_router(system.router)
