@@ -104,8 +104,11 @@ cd backend && uv run pytest      # risk-gateway matrix, rule AST, sim broker, fu
 - **Append-only audit**: every state transition (proposal, risk run, approval, submit, fill,
   alert, version change) writes to `audit_log`.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full architecture, data model,
-agent workflows, and the 3-step roadmap (MVP 1 → risk engine → live-ready governance).
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the current application architecture,
+data model, agent workflows, and 3-step roadmap. See
+[docs/OPTIONS_PAPER_TRADING_ARCHITECTURE.md](docs/OPTIONS_PAPER_TRADING_ARCHITECTURE.md)
+for the options paper-trading competition extension plan: data layer, strategy library,
+agent workflow, risk rules, validation framework, dashboard UX, roadmap, and failure modes.
 
 ## Limitations (honest list)
 
