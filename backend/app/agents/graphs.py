@@ -123,6 +123,94 @@ DEFAULT_DISCOVERY_UNIVERSE = [
 ]
 
 
+STRATEGIC_THEMES = {
+    "ai": {
+        "label": "AI platforms and infrastructure",
+        "aliases": ["artificial_intelligence", "gen_ai", "genai", "machine_learning"],
+        "durability": 96,
+        "symbols": {
+            "NVDA": 1.0, "MSFT": 0.95, "GOOGL": 0.92, "AMZN": 0.90, "META": 0.88,
+            "AVGO": 0.86, "AMD": 0.84, "ORCL": 0.78, "CRM": 0.70, "NOW": 0.72,
+            "PLTR": 0.76, "SNOW": 0.62, "ADBE": 0.58, "TSM": 0.70, "ASML": 0.68,
+        },
+        "keywords": ["software", "cloud", "semiconductor", "data", "analytics", "internet content"],
+    },
+    "semiconductors": {
+        "label": "Semiconductors and compute supply chain",
+        "aliases": ["semiconductor", "semis", "chips", "compute", "semi_conductors", "semicopnductors"],
+        "durability": 94,
+        "symbols": {
+            "NVDA": 1.0, "AMD": 0.90, "AVGO": 0.88, "TSM": 0.92, "ASML": 0.95,
+            "AMAT": 0.84, "LRCX": 0.80, "KLAC": 0.82, "MU": 0.74, "QCOM": 0.72,
+            "TXN": 0.68, "ARM": 0.82, "INTC": 0.58, "ON": 0.62, "ADI": 0.66,
+        },
+        "keywords": ["semiconductor", "chip", "equipment", "electronic components"],
+    },
+    "defense_military": {
+        "label": "Defense, military systems, and national security",
+        "aliases": ["defense", "defence", "military", "aerospace_defense", "national_security"],
+        "durability": 88,
+        "symbols": {
+            "LMT": 0.95, "RTX": 0.90, "NOC": 0.94, "GD": 0.88, "LHX": 0.82,
+            "HII": 0.78, "BA": 0.62, "PLTR": 0.64, "KTOS": 0.70, "AVAV": 0.72,
+            "TXT": 0.48, "HEI": 0.44, "TDG": 0.40,
+        },
+        "keywords": ["aerospace", "defense", "security", "military"],
+    },
+    "cybersecurity": {
+        "label": "Cybersecurity and digital resilience",
+        "aliases": ["cyber", "security_software"],
+        "durability": 90,
+        "symbols": {
+            "PANW": 0.95, "CRWD": 0.94, "ZS": 0.86, "FTNT": 0.82, "NET": 0.72,
+            "OKTA": 0.62, "S": 0.58, "MSFT": 0.56, "DDOG": 0.42, "CHKP": 0.60,
+        },
+        "keywords": ["security", "cyber", "software", "network"],
+    },
+    "energy_grid": {
+        "label": "Energy security, electrification, and grid infrastructure",
+        "aliases": ["energy_security", "grid", "electrification", "power"],
+        "durability": 84,
+        "symbols": {
+            "CEG": 0.88, "NEE": 0.76, "ETN": 0.82, "GEV": 0.82, "VST": 0.72,
+            "PWR": 0.78, "HUBB": 0.70, "EMR": 0.54, "LIN": 0.42, "TSLA": 0.48,
+            "ENPH": 0.48, "FSLR": 0.50,
+        },
+        "keywords": ["utilities", "electrical", "power", "renewable", "energy"],
+    },
+    "space": {
+        "label": "Space, satellite, and aerospace infrastructure",
+        "aliases": ["satellite", "space_economy"],
+        "durability": 76,
+        "symbols": {
+            "LMT": 0.60, "NOC": 0.62, "RTX": 0.48, "BA": 0.42, "RKLB": 0.76,
+            "IRDM": 0.70, "ASTS": 0.58, "VSAT": 0.52, "LHX": 0.54, "HON": 0.34,
+        },
+        "keywords": ["aerospace", "satellite", "space"],
+    },
+    "robotics_automation": {
+        "label": "Robotics, industrial automation, and autonomous systems",
+        "aliases": ["robotics", "automation", "autonomy"],
+        "durability": 82,
+        "symbols": {
+            "ISRG": 0.82, "TER": 0.68, "ROK": 0.70, "HON": 0.58, "ABBNY": 0.62,
+            "SYM": 0.52, "TSLA": 0.60, "NVDA": 0.64, "ZBRA": 0.48, "DE": 0.46,
+        },
+        "keywords": ["automation", "robotics", "industrial", "medical devices", "auto"],
+    },
+    "biotech_health": {
+        "label": "Biotechnology, precision medicine, and health resilience",
+        "aliases": ["biotech", "healthcare", "precision_medicine"],
+        "durability": 80,
+        "symbols": {
+            "LLY": 0.82, "NVO": 0.84, "VRTX": 0.78, "REGN": 0.72, "MRNA": 0.55,
+            "CRSP": 0.58, "BEAM": 0.46, "TMO": 0.58, "DHR": 0.54, "ISRG": 0.56,
+        },
+        "keywords": ["biotechnology", "drug", "healthcare", "medical", "life sciences"],
+    },
+}
+
+
 def gather_symbol_data(symbols: list[str], benchmark: str) -> dict[str, dict]:
     """Open-source data bundle per symbol: latest price, technical indicators (computed
     from OHLCV history), and yfinance fundamentals. Shared by research, bull/bear, and
@@ -475,6 +563,182 @@ def _normalize_symbols(symbols: list[str]) -> list[str]:
         seen.add(clean)
         out.append(clean)
     return out
+
+
+# -------------------------------------------------------- StrategicDiscovery
+# Long-term strategic-asset screener. This ranks strategic theme exposure first,
+# then blends growth runway, quality, durability, macro resilience, and risk.
+
+def _normalize_themes(themes: list[str]) -> list[str]:
+    aliases = {key: key for key in STRATEGIC_THEMES}
+    for key, spec in STRATEGIC_THEMES.items():
+        for alias in spec["aliases"]:
+            aliases[alias] = key
+    out: list[str] = []
+    for theme in themes:
+        key = str(theme).strip().lower().replace(" ", "_").replace("-", "_")
+        key = aliases.get(key, key)
+        if key in STRATEGIC_THEMES and key not in out:
+            out.append(key)
+    return out or ["ai", "semiconductors", "defense_military"]
+
+
+def _strategic_symbols_for(themes: list[str]) -> list[str]:
+    weighted: dict[str, float] = {}
+    for theme in themes:
+        for sym, exposure in STRATEGIC_THEMES[theme]["symbols"].items():
+            weighted[sym] = max(weighted.get(sym, 0.0), exposure)
+    return [sym for sym, _ in sorted(weighted.items(), key=lambda item: item[1], reverse=True)]
+
+
+def _theme_exposures(symbol: str, fundamentals: dict, themes: list[str]) -> dict[str, float]:
+    industry = str(fundamentals.get("industry") or "").lower()
+    sector = str(fundamentals.get("sector") or "").lower()
+    text = f"{industry} {sector}"
+    exposures: dict[str, float] = {}
+    for theme in themes:
+        spec = STRATEGIC_THEMES[theme]
+        direct = float(spec["symbols"].get(symbol, 0.0))
+        keyword_hits = sum(1 for keyword in spec["keywords"] if keyword in text)
+        inferred = min(0.45, keyword_hits * 0.15)
+        exposures[theme] = round(max(direct, inferred), 3)
+    return exposures
+
+
+def _strategic_target_growth(base_target: float, exposure_score: float, durability: float,
+                             quality: float, risk_score: float, horizon_years: int) -> float:
+    runway = exposure_score * 0.32 + durability * 0.12 + max(0.0, quality - 50) * 0.18
+    horizon_boost = max(1, horizon_years - 1) * 2.5
+    raw = base_target * 0.45 + runway + horizon_boost - max(0.0, risk_score - 60) * 0.18
+    return round(_clamp(raw, -20.0, 160.0), 1)
+
+
+def _strategic_row(symbol: str, payload: dict, themes: list[str], horizon_years: int,
+                   macro: dict | None) -> dict:
+    price = _num(payload.get("price"), 0.0) or 0.0
+    ind = payload.get("indicators", {}) or {}
+    f = payload.get("fundamentals", {}) or {}
+    quality = _quality_score(f)
+    technical = _technical_score(ind)
+    risk_score, risk_level, risk_notes = _risk_score(ind, f, macro)
+    base_target = _target_growth_pct(price, ind, f, quality, technical, risk_score, macro)
+    exposures = _theme_exposures(symbol, f, themes)
+    total_exposure = _clamp(sum(exposures.values()) * 100, 0, 100)
+    strongest = sorted(exposures.items(), key=lambda item: item[1], reverse=True)[:3]
+    durability = 0.0
+    exposure_sum = sum(exposures.values())
+    if exposure_sum > 0:
+        durability = sum(STRATEGIC_THEMES[t]["durability"] * e for t, e in exposures.items()) / exposure_sum
+    target_growth = _strategic_target_growth(base_target, total_exposure, durability, quality, risk_score, horizon_years)
+    macro_fit, macro_notes = _macro_fit(str(f.get("sector") or "Unknown"), risk_score, macro)
+    strategic_score = round(_clamp(
+        total_exposure * 0.34
+        + target_growth * 0.22
+        + quality * 0.16
+        + durability * 0.14
+        + macro_fit * 0.08
+        + technical * 0.06
+        - risk_score * 0.16
+    ), 1)
+    theme_labels = [STRATEGIC_THEMES[t]["label"] for t, e in strongest if e > 0]
+    if not theme_labels:
+        theme_labels = ["weak strategic-theme match"]
+    thesis = (
+        f"{symbol} is a long-term strategic tracking candidate across {', '.join(theme_labels[:2])}. "
+        f"The model estimates {target_growth:.1f}% {horizon_years}y growth potential with {risk_level} risk."
+    )
+    invalidation = (
+        "Re-run if the company loses strategic theme relevance, growth/quality metrics deteriorate, "
+        "valuation risk becomes extreme, or macro/geopolitical risk materially changes the theme."
+    )
+    key_points = [
+        f"strategic exposure {total_exposure:.0f}/100",
+        f"{horizon_years}y target growth {target_growth:.1f}%",
+        f"theme durability {durability:.0f}/100",
+        f"quality {quality:.0f}/100",
+        f"risk level {risk_level}",
+    ]
+    return {
+        "symbol": symbol,
+        "score": strategic_score,
+        "confidence": round(strategic_score / 100, 3),
+        "target_growth_pct": target_growth,
+        "risk_score": risk_score,
+        "risk_level": risk_level,
+        "thesis": thesis,
+        "invalidation": invalidation,
+        "data_used": {
+            "perspective": "strategic_discovery",
+            "signal_strength": strategic_score,
+            "target_growth_pct": target_growth,
+            "risk_level": risk_level,
+            "risk_score": risk_score,
+            "horizon_years": horizon_years,
+            "strategic_themes": theme_labels,
+            "theme_exposures": exposures,
+            "selected_theme_keys": themes,
+            "scores": {
+                "strategic_exposure": round(total_exposure, 1),
+                "theme_durability": round(durability, 1),
+                "quality": quality,
+                "technical": technical,
+                "macro_fit": macro_fit,
+                "base_12m_target_growth": base_target,
+            },
+            "key_points": key_points,
+            "risk_factors": risk_notes,
+            "macro_notes": macro_notes,
+            "inputs": payload,
+        },
+    }
+
+
+def run_strategic_discovery(db: Session, user_id: int, themes: list[str], symbols: list[str],
+                            limit: int = 20, horizon_years: int = 5) -> AgentRun:
+    themes = _normalize_themes(themes)
+    universe = _normalize_symbols(symbols or _strategic_symbols_for(themes))[:140]
+    limit = max(1, min(50, limit))
+    horizon_years = max(2, min(10, horizon_years))
+    run = AgentRun(user_id=user_id, graph="strategic_discovery",
+                   inputs={"themes": themes, "symbols": universe, "limit": limit,
+                           "horizon_years": horizon_years})
+    db.add(run)
+    db.commit()
+    try:
+        data = gather_symbol_data(universe, "SPY")
+        from app.models import MacroSnapshot
+        macro = db.scalar(select(MacroSnapshot).order_by(MacroSnapshot.as_of.desc()).limit(1))
+        rows = [
+            _strategic_row(sym, payload, themes, horizon_years, macro.regimes if macro else None)
+            for sym, payload in data.items()
+            if payload.get("price")
+        ]
+        rows.sort(key=lambda r: (r["score"], r["target_growth_pct"]), reverse=True)
+        selected = rows[:limit]
+        for row in selected:
+            db.add(Recommendation(
+                agent_run_id=run.id,
+                user_id=user_id,
+                symbol=row["symbol"],
+                action="track",
+                confidence=row["confidence"],
+                risk_score=row["risk_score"],
+                thesis=row["thesis"],
+                invalidation=row["invalidation"],
+                data_used=row["data_used"],
+            ))
+        summary = (
+            f"Strategic Discovery ranked {len(rows)} symbols across "
+            f"{', '.join(STRATEGIC_THEMES[t]['label'] for t in themes)} and proposed {len(selected)}"
+        )
+        _finish_run(db, run, summary, 0, 0)
+        audit(db, "agent.strategic_discovery_done", user_id=user_id, actor="agent", entity="agent_run",
+              entity_id=run.id, payload={"ranked": len(rows), "selected": len(selected),
+                                         "themes": themes, "horizon_years": horizon_years})
+        db.commit()
+    except Exception as exc:
+        _finish_run(db, run, "", 0, 0, status="failed", error=str(exc))
+    return run
 
 
 def _gather_node(state: ResearchState) -> dict:

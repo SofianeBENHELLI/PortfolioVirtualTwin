@@ -13,6 +13,18 @@ def _fake_data(symbols, benchmark):
     out = {}
     for i, sym in enumerate(symbols):
         rank = i + 1
+        industry = {
+            "NVDA": "Semiconductors",
+            "AMD": "Semiconductors",
+            "ASML": "Semiconductor Equipment",
+            "TSM": "Semiconductors",
+            "LMT": "Aerospace & Defense",
+            "RTX": "Aerospace & Defense",
+            "NOC": "Aerospace & Defense",
+            "PANW": "Cybersecurity Software",
+            "CRWD": "Cybersecurity Software",
+        }.get(sym, "Software")
+        sector = "Industrials" if "Defense" in industry else "Technology"
         out[sym] = {
             "price": 100.0,
             "indicators": {
@@ -25,7 +37,8 @@ def _fake_data(symbols, benchmark):
                 "volume_confirmation": True,
             },
             "fundamentals": {
-                "sector": "Technology" if rank % 3 else "Healthcare",
+                "sector": sector,
+                "industry": industry,
                 "revenueGrowth": 0.08 + rank * 0.004,
                 "earningsGrowth": 0.10 + rank * 0.003,
                 "profitMargins": 0.18,
@@ -108,4 +121,53 @@ def test_stock_discovery_can_add_proposals_to_watchlist(client, auth):
 
 def test_stock_discovery_validates_limit(client, auth):
     r = client.post("/api/agents/stock-discovery", json={"symbols": SYMBOLS[:3], "limit": 0}, headers=auth)
+    assert r.status_code == 422
+
+
+def test_strategic_discovery_ranks_long_term_theme_assets(client, auth, db):
+    from app.models import MacroSnapshot, Recommendation
+
+    db.add(MacroSnapshot(regimes={"risk_off": False, "volatility_regime": "calm", "war_risk": "low"}))
+    db.commit()
+    r = client.post("/api/agents/strategic-discovery",
+                    json={"themes": ["AI", "Semicopnductors", "military"], "limit": 8,
+                          "horizon_years": 5}, headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["graph"] == "strategic_discovery"
+    assert body["status"] == "done"
+    assert body["selected_themes"] == ["ai", "semiconductors", "defense_military"]
+    assert body["horizon_years"] == 5
+    recs = body["recommendations"]
+    assert len(recs) == 8
+    top = recs[0]
+    assert top["action"] == "track"
+    assert top["target_growth_pct"] > 0
+    assert top["risk_level"] in ("low", "moderate", "elevated", "high")
+    assert top["horizon_years"] == 5
+    assert top["data_used"]["perspective"] == "strategic_discovery"
+    assert top["data_used"]["scores"]["strategic_exposure"] > 0
+    assert top["strategic_themes"]
+    assert any(max(rec["data_used"]["theme_exposures"].values()) > 0 for rec in recs)
+
+    persisted = db.query(Recommendation).filter_by(agent_run_id=body["id"]).all()
+    assert len(persisted) == 8
+
+
+def test_strategic_discovery_can_focus_defense_and_add_watchlist(client, auth):
+    r = client.post("/api/agents/strategic-discovery",
+                    json={"themes": ["military"], "symbols": ["NVDA", "LMT", "RTX", "NOC"],
+                          "limit": 2, "horizon_years": 7, "add_to_watchlist": True}, headers=auth)
+    assert r.status_code == 200
+    body = r.json()
+    symbols = [rec["symbol"] for rec in body["recommendations"]]
+    assert set(symbols) <= {"LMT", "RTX", "NOC"}
+    assert len(body["added_to_watchlist"]) == 2
+
+    watched = client.get("/api/watchlist", headers=auth).json()
+    assert {row["symbol"] for row in watched} == set(body["added_to_watchlist"])
+
+
+def test_strategic_discovery_validates_horizon(client, auth):
+    r = client.post("/api/agents/strategic-discovery", json={"themes": ["ai"], "horizon_years": 1}, headers=auth)
     assert r.status_code == 422

@@ -44,6 +44,14 @@ class StockDiscoveryRequest(BaseModel):
     add_to_watchlist: bool = False
 
 
+class StrategicDiscoveryRequest(BaseModel):
+    themes: list[str] = []
+    symbols: list[str] = []
+    limit: int = 20
+    horizon_years: int = 5
+    add_to_watchlist: bool = False
+
+
 @router.get("/status")
 def status(user: User = Depends(get_current_user), db: Session = Depends(get_db)):
     from app.agents.llm import resolve_openai_key
@@ -107,19 +115,29 @@ def stock_discovery(payload: StockDiscoveryRequest, user: User = Depends(get_cur
         raise HTTPException(502, f"Stock discovery failed: {friendly_llm_error(run.error)}")
     out = _run_out(db, run)
     if payload.add_to_watchlist:
-        from app.models import WatchedStock
-        added = []
-        for rec in db.scalars(select(Recommendation).where(Recommendation.agent_run_id == run.id)):
-            exists = db.scalar(select(WatchedStock).where(WatchedStock.user_id == user.id,
-                                                          WatchedStock.symbol == rec.symbol))
-            if exists is None:
-                db.add(WatchedStock(user_id=user.id, symbol=rec.symbol))
-                added.append(rec.symbol)
-        if added:
-            from app.audit.service import audit
-            audit(db, "watchlist.discovery_added", user_id=user.id, payload={"symbols": added})
-            db.commit()
-        out["added_to_watchlist"] = added
+        out["added_to_watchlist"] = _add_run_recs_to_watchlist(db, user.id, run.id, "watchlist.discovery_added")
+    return out
+
+
+@router.post("/strategic-discovery")
+def strategic_discovery(payload: StrategicDiscoveryRequest, user: User = Depends(get_current_user),
+                        db: Session = Depends(get_db)):
+    if payload.limit < 1 or payload.limit > 50:
+        raise HTTPException(422, "limit must be between 1 and 50")
+    if payload.horizon_years < 2 or payload.horizon_years > 10:
+        raise HTTPException(422, "horizon_years must be between 2 and 10")
+    run = graphs.run_strategic_discovery(
+        db, user.id, payload.themes, payload.symbols, payload.limit, payload.horizon_years
+    )
+    bus.publish("agent_run", {"id": run.id, "graph": "strategic_discovery", "status": run.status})
+    if run.status == "failed":
+        raise HTTPException(502, f"Strategic discovery failed: {friendly_llm_error(run.error)}")
+    out = _run_out(db, run)
+    out["selected_themes"] = run.inputs.get("themes", [])
+    out["horizon_years"] = run.inputs.get("horizon_years", payload.horizon_years)
+    if payload.add_to_watchlist:
+        out["added_to_watchlist"] = _add_run_recs_to_watchlist(db, user.id, run.id,
+                                                               "watchlist.strategic_discovery_added")
     return out
 
 
@@ -169,6 +187,10 @@ def _rec_out(r: Recommendation) -> dict:
         out["risk_level"] = data["risk_level"]
     if "signal_strength" in data:
         out["signal_strength"] = data["signal_strength"]
+    if "strategic_themes" in data:
+        out["strategic_themes"] = data["strategic_themes"]
+    if "horizon_years" in data:
+        out["horizon_years"] = data["horizon_years"]
     return out
 
 
@@ -182,3 +204,20 @@ def _run_out(db: Session, r: AgentRun, include_recs: bool = True) -> dict:
         recs = db.scalars(select(Recommendation).where(Recommendation.agent_run_id == r.id)).all()
         out["recommendations"] = [_rec_out(x) for x in recs]
     return out
+
+
+def _add_run_recs_to_watchlist(db: Session, user_id: int, run_id: int, audit_action: str) -> list[str]:
+    from app.audit.service import audit
+    from app.models import WatchedStock
+
+    added = []
+    for rec in db.scalars(select(Recommendation).where(Recommendation.agent_run_id == run_id)):
+        exists = db.scalar(select(WatchedStock).where(WatchedStock.user_id == user_id,
+                                                      WatchedStock.symbol == rec.symbol))
+        if exists is None:
+            db.add(WatchedStock(user_id=user_id, symbol=rec.symbol))
+            added.append(rec.symbol)
+    if added:
+        audit(db, audit_action, user_id=user_id, payload={"symbols": added})
+        db.commit()
+    return added
